@@ -1,0 +1,21 @@
+# Environment files with real values
+.env
+**/.env
+
+# TLS certificates and ACME state (contains private keys)
+traefik/acme.json
+traefik/acme.json*
+
+# Runtime data directories
+actual/actual-data/
+
+# Sensitive config files
+n8n/private-config.json
+
+# Claude Code working directory
+.claude/
+
+# Backup/scratch files
+*.save
+*.bak
+*.backup
