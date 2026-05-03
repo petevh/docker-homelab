@@ -1,0 +1,46 @@
+{
+  "_comment": "Copy to private-config.json and fill in real values. NEVER commit private-config.json.",
+
+  "banks": {
+    "enbd_current_pete": {
+      "decryption_password": "your-pdf-password-here",
+      "ynab_account_id": "your-ynab-account-uuid",
+      "actual_account_name": "ENBD Pete",
+      "onedrive_folder": "Documents/Bank/Emirates NBD/Current",
+      "cards": []
+    },
+    "enbd_savings_fi": {
+      "decryption_password": "your-pdf-password-here",
+      "ynab_account_id": "your-ynab-account-uuid",
+      "actual_account_name": "ENBD - Fi",
+      "onedrive_folder": "Documents/Bank/Emirates NBD - Fi/Savings"
+    },
+    "enbd_visa_infinite": {
+      "decryption_password": "your-pdf-password-here",
+      "ynab_account_id": "your-ynab-account-uuid",
+      "actual_account_name": "ENBD-Visa-Infinite",
+      "onedrive_folder": "Bank Statements/ENBD/CreditCard",
+      "cards": [
+        {
+          "last4": "0000",
+          "cardholder": "Primary"
+        }
+      ]
+    }
+  },
+
+  "ynab": {
+    "budgets": {
+      "AED": "your-ynab-budget-uuid",
+      "USD": "your-ynab-budget-uuid",
+      "EUR": "your-ynab-budget-uuid",
+      "ZAR": "your-ynab-budget-uuid"
+    },
+    "default_budget_id": "your-ynab-budget-uuid"
+  },
+
+  "actual": {
+    "server_url": "https://actual.app.vanheerden.ch",
+    "sync_id": "your-sync-id"
+  }
+}

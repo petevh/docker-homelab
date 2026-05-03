@@ -1,0 +1,42 @@
+services:
+  n8n:
+    build: .
+    container_name: n8n
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      - TZ=Asia/Dubai
+      - N8N_HOST=n8n.app.vanheerden.ch
+      - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - WEBHOOK_URL=https://n8n.app.vanheerden.ch/
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - DB_SQLITE_POOL_SIZE=3
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+      - N8N_TRUST_PROXY=true
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./private-config.json:/data/private-config.json:ro
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.app.vanheerden.ch`)"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls.certresolver=cloudflare"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
+
+volumes:
+  n8n_data:
