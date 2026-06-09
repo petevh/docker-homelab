@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TaskerData sr="" dvi="1" tv="6.3.13">
+  <Task sr="task1">
+    <cdate>1000000000000</cdate>
+    <edate>1000000000000</edate>
+    <id>1</id>
+    <nme>Unlock Front Door</nme>
+    <pri>100</pri>
+    <Action sr="act0" ve="7">
+      <code>339</code>
+      <Str sr="arg0" ve="3">http://DOCKER_HOST:8000/unlock</Str>
+      <Str sr="arg1" ve="3">POST</Str>
+      <Str sr="arg2" ve="3"></Str>
+      <Str sr="arg3" ve="3">X-API-Key:YOUR_API_KEY</Str>
+      <Str sr="arg4" ve="3"></Str>
+      <Str sr="arg5" ve="3">%http_response</Str>
+      <Str sr="arg6" ve="3">%http_response_code</Str>
+      <Int sr="arg7" val="0"/>
+      <Int sr="arg8" val="30"/>
+      <Int sr="arg9" val="0"/>
+    </Action>
+    <Action sr="act1" ve="7">
+      <code>37</code>
+      <Str sr="arg0" ve="3">%http_response_code</Str>
+      <Int sr="arg1" val="0"/>
+      <Str sr="arg2" ve="3">200</Str>
+      <Int sr="arg3" val="0"/>
+    </Action>
+    <Action sr="act2" ve="7">
+      <code>7</code>
+      <Str sr="arg0" ve="3">🔓 Door Unlocked</Str>
+      <Int sr="arg1" val="0"/>
+      <Int sr="arg2" val="0"/>
+    </Action>
+    <Action sr="act3" ve="7">
+      <code>3</code>
+    </Action>
+    <Action sr="act4" ve="7">
+      <code>7</code>
+      <Str sr="arg0" ve="3">❌ Unlock Failed (HTTP %http_response_code)</Str>
+      <Int sr="arg1" val="0"/>
+      <Int sr="arg2" val="0"/>
+    </Action>
+    <Action sr="act5" ve="7">
+      <code>3</code>
+    </Action>
+  </Task>
+</TaskerData>

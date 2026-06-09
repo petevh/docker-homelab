@@ -9,6 +9,7 @@ services:
 
     environment:
       - TZ=Asia/Dubai
+      - GENERIC_TIMEZONE=Asia/Dubai
       - N8N_HOST=n8n.app.vanheerden.ch
       - N8N_PROTOCOL=https
       - N8N_PORT=5678

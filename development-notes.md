@@ -1,5 +1,38 @@
 # Development Notes
 
+## 2026-06-09 — Dahua intercom service added
+
+New service `intercom/` wraps the Dahua VTH2622GW-W intercom via a FastAPI HTTP API, exposing door unlock, camera stream, and doorbell events for integration with Home Assistant, n8n, iOS Shortcuts, and Tasker.
+
+### Architecture
+
+- `dahua_client.py` — DHIP protocol client (port 5000, direct LAN connection to VTH)
+- `main.py` — FastAPI app with `/unlock`, `/stream`, `/events`, `/health` endpoints
+- Exposed at `https://intercom.app.vanheerden.ch` via Traefik
+- Auth: `X-API-Key` header required on all requests
+- Traefik middlewares: rate limit (10 req/min) + IP allowlist (Tailscale + home LAN)
+
+### Credentials
+
+All secrets in `intercom/.env` (gitignored, on NAS share). API key stored in 1Password.
+
+### Current state
+
+- `/unlock` — implemented and working (DHIP `UnlockManager.openDoors`)
+- `/stream` — stub, returns 501 (pending `dos_stream.py` promotion from `dahua-research` repo)
+- `/events` — stub, returns 501 (pending DHIP event subscription implementation)
+
+### Next steps
+
+- [ ] Test `/unlock` — confirm which param format the VTH accepts: `{"channel": 1}` or `{"DoorIndex": 0}`, then remove the losing branch from `dahua_client.py:open_doors()`
+- [ ] Implement `/stream` — promote `dos_stream.py` from `dahua-research` into `dahua_client.get_stream_url()`
+- [ ] Implement `/events` — DHIP event subscription for doorbell/motion SSE stream
+- [ ] Wire up Home Assistant `rest_command` for unlock
+- [ ] Wire up n8n HTTP Request node
+- [ ] Wire up iOS Shortcut
+
+
+
 ## 2026-05-03 — Initial repo setup and container migration
 
 ### Secrets management

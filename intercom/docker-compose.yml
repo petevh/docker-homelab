@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  intercom:
+    build: .
+    container_name: intercom
+    restart: unless-stopped
+    networks:
+      - traefik
+    environment:
+      - DAHUA_API_KEY=${DAHUA_API_KEY}
+      - DAHUA_VTH_HOST=${DAHUA_VTH_HOST:-192.168.40.55}
+      - DAHUA_VTH_PORT=${DAHUA_VTH_PORT:-5000}
+      - DAHUA_VTH_USERNAME=${DAHUA_VTH_USERNAME:-user}
+      - DAHUA_VTH_PASSWORD=${DAHUA_VTH_PASSWORD}
+      - DAHUA_CHANNEL=${DAHUA_CHANNEL:-1}
+      - DAHUA_DOOR_INDEX=${DAHUA_DOOR_INDEX:-0}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.intercom.rule=Host(`intercom.app.vanheerden.ch`)"
+      - "traefik.http.routers.intercom.entrypoints=websecure"
+      - "traefik.http.routers.intercom.tls=true"
+      - "traefik.http.routers.intercom.tls.certresolver=cloudflare"
+      - "traefik.http.services.intercom.loadbalancer.server.port=8000"
+      # Rate limiting — max 10 requests/minute to prevent brute force
+      - "traefik.http.middlewares.dahua-ratelimit.ratelimit.average=10"
+      - "traefik.http.middlewares.dahua-ratelimit.ratelimit.burst=5"
+      - "traefik.http.middlewares.dahua-ratelimit.ratelimit.period=1m"
+      # Tailscale IP allowlist — only Tailscale CGNAT range + home LAN
+      - "traefik.http.middlewares.dahua-ipallowlist.ipallowlist.sourcerange=100.64.0.0/10,192.168.0.0/16"
+      # Apply middlewares
+      - "traefik.http.routers.intercom.middlewares=dahua-ratelimit,dahua-ipallowlist"
+
+networks:
+  traefik:
+    external: true
