@@ -22,6 +22,12 @@ All secrets in `intercom/.env` (gitignored, on NAS share). API key stored in 1Pa
 - `/stream` — stub, returns 501 (pending `dos_stream.py` promotion from `dahua-research` repo)
 - `/events` — stub, returns 501 (pending DHIP event subscription implementation)
 
+### Status
+
+- `/unlock` endpoint reachable at `https://intercom.app.vanheerden.ch/unlock` with valid Let's Encrypt cert
+- `/health` confirmed working
+- API key configured (stored in 1Password)
+
 ### Next steps
 
 - [ ] Test `/unlock` — confirm which param format the VTH accepts: `{"channel": 1}` or `{"DoorIndex": 0}`, then remove the losing branch from `dahua_client.py:open_doors()`
@@ -30,6 +36,14 @@ All secrets in `intercom/.env` (gitignored, on NAS share). API key stored in 1Pa
 - [ ] Wire up Home Assistant `rest_command` for unlock
 - [ ] Wire up n8n HTTP Request node
 - [ ] Wire up iOS Shortcut
+
+## 2026-06-09 — Traefik upgrade (v3.0 → v3.7)
+
+**Root cause:** Docker was updated to 29.x which raised the minimum API version to 1.40. Traefik v3.0–v3.3 hardcode `/v1.24/` API calls and fail entirely — no container discovery, no routing.
+
+**Fix:** Upgraded to `traefik:v3.7` (built June 2026, compatible with Docker 29.x).
+
+**Disk note:** Docker image pulls during troubleshooting (v3.3, v3.7, socket-proxy) left the root volume at 96% used (24GB total). Old images cleaned up but further housekeeping needed.
 
 
 
