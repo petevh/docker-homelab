@@ -1,8 +1,9 @@
 # dahua-intercom
 
-Production HTTP API for Dahua DHI-VTH2622GW-W intercom integration.
-Exposes door unlock, camera stream, and doorbell events for use with
-Home Assistant, n8n, iOS Shortcuts, Tasker, or any HTTP client.
+FastAPI service that unlocks the front door via the Dahua P2P cloud API.
+Runs behind Traefik, accessible over Tailscale at `https://intercom.app.vanheerden.ch`.
+
+See `DEVNOTES.md` for research background (why cloud API, why not direct DHIP).
 
 ## Endpoints
 
@@ -10,92 +11,100 @@ Home Assistant, n8n, iOS Shortcuts, Tasker, or any HTTP client.
 |----------|--------|--------|-------------|
 | `/health` | GET | ✅ | Health check |
 | `/unlock` | POST | ✅ | Trigger door unlock via Dahua P2P cloud |
-| `/stream` | GET | 🚧 | Get VTO camera stream URL |
-| `/events` | GET (SSE) | 🚧 | Doorbell/motion event stream |
+| `/stream` | GET | 🚧 | VTO camera stream URL — pending stream research |
+| `/events` | GET (SSE) | 🚧 | Doorbell/motion event stream — not yet started |
+
+Swagger UI: `https://intercom.app.vanheerden.ch/docs`
 
 ## Setup
 
-1. Copy `dahua_client.py` (promoted from `dahua-research` repo) into this directory
-2. Edit `docker-compose.yml` — set credentials and a strong `DAHUA_API_KEY`
-3. Build and run:
-   ```bash
-   docker compose up -d
-   ```
-
-## Usage
-
-### Unlock the door
 ```bash
-curl -X POST http://localhost:8000/unlock \
-  -H "X-API-Key: changeme"
+cp .env.example .env
+# edit .env — set DAHUA_BEARER_TOKEN, DAHUA_PCS_USERNAME, DAHUA_DEVICE_PASSWORD, DAHUA_API_KEY
+docker compose up -d
 ```
 
-### Get stream URL (once implemented)
+## Quick test
+
 ```bash
-curl http://localhost:8000/stream \
-  -H "X-API-Key: changeme"
+curl -X POST https://intercom.app.vanheerden.ch/unlock \
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
-### API docs (Swagger UI)
-```
-http://localhost:8000/docs
-```
+---
 
-## Home Assistant Integration
+## Client Integrations
 
-### rest_command (unlock)
+All clients use `https://intercom.app.vanheerden.ch/unlock` — reachable over
+Tailscale (Traefik IP allowlist covers `100.64.0.0/10`). No direct port access needed.
+
+### iOS Shortcut
+
+1. Add action: **Get Contents of URL**
+2. URL: `https://intercom.app.vanheerden.ch/unlock`
+3. Method: `POST`
+4. Headers: `X-API-Key` → `YOUR_API_KEY`
+5. Add action: **If** → `Contents of URL` contains `true` → show notification "🔓 Unlocked"
+
+Add to Home Screen for one-tap unlock.
+
+### Tasker
+
+Import `unlock_door.xml` (in this directory) — replace `YOUR_API_KEY` in the HTTP
+Request action. The task:
+1. POST to `https://intercom.app.vanheerden.ch/unlock` with `X-API-Key` header
+2. Flashes "🔓 Door Unlocked" on HTTP 200, or "❌ Unlock Failed (HTTP NNN)" otherwise
+
+No AutoWeb needed — native Tasker HTTP Request handles this cleanly.
+
+Assign to a widget, NFC tag, or Tasker scene button as preferred.
+
+### n8n
+
+**HTTP Request node:**
+- Method: `POST`
+- URL: `https://intercom.app.vanheerden.ch/unlock`
+- Authentication: Header Auth → Name: `X-API-Key`, Value: `YOUR_API_KEY`
+- Response: check `success` field is `true`
+
+Typical use: trigger from a webhook (HA doorbell event → n8n → unlock).
+
+### Home Assistant
+
+**`configuration.yaml` — rest_command:**
 ```yaml
 rest_command:
   unlock_front_door:
-    url: http://<docker-host>:8000/unlock
+    url: https://intercom.app.vanheerden.ch/unlock
     method: POST
     headers:
-      X-API-Key: "changeme"
+      X-API-Key: !secret intercom_api_key
 ```
 
-### Automation (doorbell → Apple TV)
+**`secrets.yaml`:**
+```yaml
+intercom_api_key: YOUR_API_KEY
+```
+
+**Automation example — doorbell button → unlock:**
 ```yaml
 automation:
-  - alias: "Doorbell → Apple TV"
+  - alias: "Front door button → unlock"
     trigger:
-      - platform: event
-        event_type: dahua_doorbell    # fired by /events SSE listener
+      - platform: state
+        entity_id: binary_sensor.front_door_button
+        to: "on"
     action:
-      - service: media_player.play_media
-        target:
-          entity_id: media_player.apple_tv
-        data:
-          media_content_id: "{{ states('sensor.dahua_stream_url') }}"
-          media_content_type: video/mp4
-      - service: rest_command.unlock_front_door  # optional auto-unlock
+      - service: rest_command.unlock_front_door
 ```
 
-## n8n
-- HTTP Request node → POST → `http://<host>:8000/unlock`
-- Header: `X-API-Key: changeme`
+HA runs on the home LAN (`192.168.x.x`) so it hits Traefik directly without Tailscale.
 
-## iOS Shortcuts
-- "Get Contents of URL" action
-- Method: POST
-- URL: `http://<tailscale-ip>:8000/unlock`
-- Header: `X-API-Key: changeme`
+---
 
-## Architecture
+## Security
 
-```
-dahua-research/          ← reverse engineering & testing
-  p2p_unlock.py          ← proven unlock logic
-  dos_stream.py          ← WIP stream logic
-  DahuaConsole/          ← research/debug tool (submodule)
-
-docker-homelab/
-  services/
-    dahua-intercom/      ← this service (production)
-      dahua_client.py    ← promoted from dahua-research when stable
-      main.py            ← FastAPI
-      Dockerfile
-      docker-compose.yml
-```
-
-Logic flows from `dahua-research` → promoted to `dahua_client.py` here
-once stable. DahuaConsole never referenced in production code.
+- `X-API-Key` header required on all non-health endpoints
+- Traefik IP allowlist: `100.64.0.0/10` (Tailscale) + `192.168.0.0/16` (LAN only)
+- Rate limit: 10 req/min, burst 5 (Traefik middleware)
+- TLS via Let's Encrypt Cloudflare DNS-01
