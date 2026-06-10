@@ -52,7 +52,8 @@ auto-connects whenever you leave home, so the Shortcut just works.
    - URL: `https://intercom.app.vanheerden.ch/unlock`
    - Tap **Show More**, set Method to `POST`
    - Tap **Add new header**: Key = `X-API-Key`, Value = `YOUR_API_KEY`
-2. Add action: **If** → `Contents of URL` contains `"success": true`
+2. Add action: **Get Details of URL Response** → Detail: **Status Code**
+3. Add action: **If** → Status Code **=** `200`
    - Show notification: "Door unlocked"
    - Otherwise: Show notification: "Unlock failed"
 
