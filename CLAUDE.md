@@ -7,11 +7,12 @@ Docker Compose configurations for all self-hosted services running on the homela
 ## Infrastructure Context
 
 - **Docker VM:** Ubuntu 24.04 LTS on Proxmox (HP EliteDesk 800 G6, server VLAN `192.168.20.x`)
-- **Docker VM IP:** `192.168.20.40` (Traefik entry point)
+- **Docker VM IP:** `192.168.20.203` (Traefik entry point)
 - **Repo location:** Cloned to TrueNAS `development` share, mounted on Docker VM at `/mnt/development`
-- **Related VMs:** Claude Code VM (development), Proxmox cluster (3 nodes)
+- **Related VMs:** Proxmox cluster (3 nodes)
+- **Note:** Claude Code runs directly on the Docker VM (`docker-vm`, `192.168.20.203`) — there is no separate Claude Code VM
 - **Domain:** `vanheerden.ch` — containers accessible at `*.app.vanheerden.ch`
-- **DNS:** OPNsense Unbound (primary) with wildcard `*.app.vanheerden.ch → 192.168.20.40`, Cloudflare (backup)
+- **DNS:** OPNsense Unbound (primary) with wildcard `*.app.vanheerden.ch → 192.168.20.203`, Cloudflare (backup)
 
 ## Repository Structure
 
@@ -46,8 +47,8 @@ docker-homelab/
 
 ```
 Internet
-    ↓ (DNS: *.app.vanheerden.ch → 192.168.20.40)
-Traefik (192.168.20.40:443)
+    ↓ (DNS: *.app.vanheerden.ch → 192.168.20.203)
+Traefik (192.168.20.203:443)
     ↓ (routes by hostname)
 Docker network: traefik (internal bridge)
     ├── n8n          (n8n.app.vanheerden.ch)

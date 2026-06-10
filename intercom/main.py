@@ -24,13 +24,14 @@ from dahua_client import unlock_door, get_stream_url, subscribe_events
 # ---------------------------------------------------------------------------
 # Config — all values from environment, no defaults for secrets
 # ---------------------------------------------------------------------------
-API_KEY       = os.environ.get("DAHUA_API_KEY", "")
-VTH_HOST      = os.environ.get("DAHUA_VTH_HOST", "192.168.40.55")
-VTH_PORT      = int(os.environ.get("DAHUA_VTH_PORT", "5000"))
-VTH_USERNAME  = os.environ.get("DAHUA_VTH_USERNAME", "user")
-VTH_PASSWORD  = os.environ.get("DAHUA_VTH_PASSWORD", "")
-CHANNEL       = int(os.environ.get("DAHUA_CHANNEL", "1"))
-DOOR_INDEX    = int(os.environ.get("DAHUA_DOOR_INDEX", "0"))
+API_KEY          = os.environ.get("DAHUA_API_KEY", "")
+BEARER_TOKEN     = os.environ.get("DAHUA_BEARER_TOKEN", "")
+PCS_USERNAME     = os.environ.get("DAHUA_PCS_USERNAME", "")
+DEVICE_SN        = os.environ.get("DAHUA_DEVICE_SN", "")
+DEVICE_USERNAME  = os.environ.get("DAHUA_DEVICE_USERNAME", "user")
+DEVICE_PASSWORD  = os.environ.get("DAHUA_DEVICE_PASSWORD", "")
+CHANNEL          = int(os.environ.get("DAHUA_CHANNEL", "1"))
+DOOR_INDEX       = int(os.environ.get("DAHUA_DOOR_INDEX", "0"))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dahua_api")
@@ -42,10 +43,11 @@ log = logging.getLogger("dahua_api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not API_KEY:
-        log.warning("DAHUA_API_KEY is not set — all requests are unauthenticated. "
-                    "Set this variable before exposing the service externally.")
-    if not VTH_PASSWORD:
-        log.warning("DAHUA_VTH_PASSWORD is not set — unlock calls will fail.")
+        log.warning("DAHUA_API_KEY is not set — all requests are unauthenticated.")
+    for var, name in [(BEARER_TOKEN, "DAHUA_BEARER_TOKEN"), (PCS_USERNAME, "DAHUA_PCS_USERNAME"),
+                      (DEVICE_SN, "DAHUA_DEVICE_SN"), (DEVICE_PASSWORD, "DAHUA_DEVICE_PASSWORD")]:
+        if not var:
+            log.warning("%s is not set — unlock calls will fail.", name)
     yield
 
 # ---------------------------------------------------------------------------
@@ -83,7 +85,7 @@ class StreamResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    vth_host: str
+    device_sn: str
     api_key_configured: bool
 
 # ---------------------------------------------------------------------------
@@ -94,7 +96,7 @@ class HealthResponse(BaseModel):
 def health():
     return HealthResponse(
         status="ok",
-        vth_host=VTH_HOST,
+        device_sn=DEVICE_SN,
         api_key_configured=bool(API_KEY),
     )
 
@@ -105,13 +107,14 @@ def unlock(auth=Depends(verify_api_key)):
     Trigger door unlock via DHIP (port 5000) directly to the VTH.
     Callable from HA rest_command, n8n HTTP Request node, iOS Shortcuts, Tasker.
     """
-    log.info("Unlock request → %s:%s", VTH_HOST, VTH_PORT)
+    log.info("Unlock request → device %s", DEVICE_SN)
     try:
         result = unlock_door(
-            host=VTH_HOST,
-            port=VTH_PORT,
-            username=VTH_USERNAME,
-            password=VTH_PASSWORD,
+            bearer_token=BEARER_TOKEN,
+            pcs_username=PCS_USERNAME,
+            device_sn=DEVICE_SN,
+            device_username=DEVICE_USERNAME,
+            device_password=DEVICE_PASSWORD,
             channel=CHANNEL,
             door_index=DOOR_INDEX,
         )
