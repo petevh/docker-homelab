@@ -43,21 +43,23 @@ Tailscale (Traefik IP allowlist covers `100.64.0.0/10`). No direct port access n
 
 ### iOS Shortcut
 
-The unlock endpoint is only reachable over Tailscale. The Tailscale iOS app
-exposes native Shortcuts actions — **Connect** is a no-op if already connected,
-so run it unconditionally before the HTTP call.
+The unlock endpoint is only reachable over Tailscale. The recommended setup is
+**VPN On Demand** (Tailscale app → profile → VPN On Demand): set Cellular to
+**Always** and Wi-Fi to **Except On** (add your home network) — Tailscale then
+auto-connects whenever you leave home, so the Shortcut just works.
 
-1. Add action: **Tailscale → Connect**
-2. Add action: **Get Contents of URL**
+1. Add action: **Get Contents of URL**
    - URL: `https://intercom.app.vanheerden.ch/unlock`
    - Method: `POST`
    - Headers: `X-API-Key` → `YOUR_API_KEY`
-3. Add action: **If** → `Contents of URL` contains `"success": true`
+2. Add action: **If** → `Contents of URL` contains `"success": true`
    - Show notification: "Door unlocked"
    - Otherwise: Show notification: "Unlock failed"
 
-Add to Home Screen for one-tap unlock. Tailscale must be installed; the Connect
-step handles the case where it was disconnected.
+Add to Home Screen for one-tap unlock.
+
+**Without VPN On Demand:** add **Tailscale → Connect** as step 1 — it's a
+no-op if already connected.
 
 ### Tasker
 
