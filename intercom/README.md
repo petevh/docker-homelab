@@ -1,6 +1,9 @@
 # dahua-intercom
 
-FastAPI service that unlocks the front door via the Dahua P2P cloud API.
+Production HTTP API for Dahua DHI-VTH2622GW-W intercom integration.
+Exposes door unlock, camera stream, and doorbell events for use with
+Home Assistant, n8n, iOS Shortcuts, Tasker, or any HTTP client.
+
 Runs behind Traefik, accessible over Tailscale at `https://intercom.app.vanheerden.ch`.
 
 See `DEVNOTES.md` for research background (why cloud API, why not direct DHIP).
