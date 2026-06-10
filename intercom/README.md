@@ -53,12 +53,10 @@ Add to Home Screen for one-tap unlock.
 
 ### Tasker
 
-Import `unlock_door.xml` (in this directory) — replace `YOUR_API_KEY` in the HTTP
-Request action. The task:
-1. POST to `https://intercom.app.vanheerden.ch/unlock` with `X-API-Key` header
-2. Flashes "🔓 Door Unlocked" on HTTP 200, or "❌ Unlock Failed (HTTP NNN)" otherwise
-
-No AutoWeb needed — native Tasker HTTP Request handles this cleanly.
+Create a task with an **HTTP Request** action (no AutoWeb needed):
+1. Method: `POST`, URL: `https://intercom.app.vanheerden.ch/unlock`
+2. Headers: `X-API-Key` → `YOUR_API_KEY`
+3. If `%http_response_code` equals `200` → Flash "Door Unlocked", else Flash "Unlock Failed (%http_response_code)"
 
 Assign to a widget, NFC tag, or Tasker scene button as preferred.
 
