@@ -103,6 +103,45 @@ automation:
 
 HA runs on the home LAN (`192.168.x.x`) so it hits Traefik directly without Tailscale.
 
+**Automation example — doorbell → Apple TV:**
+```yaml
+automation:
+  - alias: "Doorbell → Apple TV"
+    trigger:
+      - platform: event
+        event_type: dahua_doorbell    # fired by /events SSE listener (not yet implemented)
+    action:
+      - service: media_player.play_media
+        target:
+          entity_id: media_player.apple_tv
+        data:
+          media_content_id: "{{ states('sensor.dahua_stream_url') }}"
+          media_content_type: video/mp4
+      - service: rest_command.unlock_front_door  # optional auto-unlock
+```
+
+---
+
+## Architecture
+
+```
+dahua-research/          ← reverse engineering & testing
+  p2p_unlock.py          ← proven unlock logic (source for dahua_client.py)
+  dos_stream.py          ← WIP stream logic
+  NEXT_STEPS.md          ← full protocol research notes
+
+docker-homelab/
+  intercom/              ← this service (production)
+    dahua_client.py      ← promoted from dahua-research when stable
+    main.py              ← FastAPI
+    Dockerfile
+    docker-compose.yml
+    DEVNOTES.md          ← research summary and open items
+```
+
+Logic flows from `dahua-research` → promoted to `dahua_client.py` here once stable.
+`dahua-research` is never referenced in production code.
+
 ---
 
 ## Security
