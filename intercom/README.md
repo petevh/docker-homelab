@@ -41,12 +41,27 @@ curl -X POST https://intercom.app.vanheerden.ch/unlock \
 All clients use `https://intercom.app.vanheerden.ch/unlock` — reachable over
 Tailscale (Traefik IP allowlist covers `100.64.0.0/10`). No direct port access needed.
 
+### Tailscale setup (required)
+
+Tailscale must be connected for the unlock endpoint to be reachable. The
+recommended setup is **always-on with inclusion split tunneling**:
+
+- In the Tailscale Android/iOS app, go to **Split Tunneling** → **Switch to Including**
+- Add only the apps that need to route through Tailscale (e.g. intercom clients)
+- All other apps (including WhatsApp or other geo-bypass needs) route direct or
+  via a separate VPN — new apps default to direct, so the list stays minimal
+
+This replaces the need for a separate always-on WireGuard VPN for geo-bypass,
+since Tailscale handles only the apps you explicitly include.
+
+**VPN On Demand (iOS):** Tailscale's "Except On" rule actively blocks manual
+connection on excluded networks — not just auto-connect. Use **Always** or leave
+VPN On Demand off if you need to connect from anywhere including home Wi-Fi.
+
 ### iOS Shortcut
 
-The unlock endpoint is only reachable over Tailscale.
-
 1. Add action: **Tailscale → Connect**
-   - Disable the confirmation notification if prompted (no need to acknowledge connection)
+   - Disable the confirmation notification if prompted
 2. Add action: **Get Contents of URL**
    - URL: `https://intercom.app.vanheerden.ch/unlock`
    - Tap **Show More**, set Method to `POST`
@@ -58,20 +73,14 @@ The unlock endpoint is only reachable over Tailscale.
 
 Add to Home Screen for one-tap unlock.
 
-**VPN On Demand note:** Tailscale's VPN On Demand "Except On" rule actively
-blocks Tailscale from connecting on excluded networks — it does not just
-disable auto-connect. Avoid using it if you need to unlock the door from
-home Wi-Fi. "Always" or leaving VPN On Demand off are better options if
-you want to connect from anywhere.
-
 ### Tasker
 
-Create a task with an **HTTP Request** action (no AutoWeb needed):
-1. Method: `POST`, URL: `https://intercom.app.vanheerden.ch/unlock`
-2. Headers: `X-API-Key` → `YOUR_API_KEY`
-3. If `%http_response_code` equals `200` → Flash "Door Unlocked", else Flash "Unlock Failed (%http_response_code)"
-
-Assign to a widget, NFC tag, or Tasker scene button as preferred.
+1. Ensure Tailscale is always-on (see above)
+2. Create a task with an **HTTP Request** action (no AutoWeb needed):
+   - Method: `POST`, URL: `https://intercom.app.vanheerden.ch/unlock`
+   - Headers: `X-API-Key` → `YOUR_API_KEY`
+   - If `%http_response_code` equals `200` → Flash "Door Unlocked", else Flash "Unlock Failed (%http_response_code)"
+3. Assign to a home screen widget or NFC tag
 
 ### n8n
 
