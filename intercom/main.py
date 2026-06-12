@@ -59,6 +59,7 @@ VTH_PORT         = int(os.environ.get("DAHUA_VTH_PORT", "5000"))
 VTH_USERNAME     = os.environ.get("DAHUA_VTH_USERNAME", "user")
 VTH_PASSWORD     = os.environ.get("DAHUA_VTH_PASSWORD", "")
 
+STREAM           = int(os.environ.get("DAHUA_STREAM", "0"))        # 0 = main/HD 1280x720, 1 = sub 352x288
 STREAM_WIDTH     = int(os.environ.get("DAHUA_STREAM_WIDTH", "0"))   # 0 = native resolution
 STREAM_QUALITY   = int(os.environ.get("DAHUA_STREAM_QUALITY", "5"))
 
@@ -131,6 +132,7 @@ async def lifespan(app: FastAPI):
             pcs_username=PCS_USERNAME,
             device_sn=DEVICE_SN,
             channel=CHANNEL,
+            stream=STREAM,
             width=STREAM_WIDTH,
             quality=STREAM_QUALITY,
         )

@@ -206,7 +206,7 @@ def get_play_token(bearer_token: str, pcs_username: str) -> str:
 
 
 def get_relay_url(play_token: str, bearer_token: str, pcs_username: str,
-                  device_sn: str, channel: int = 1, stream: int = 1) -> str:  # stream=1 = 352x288 sub-stream (clean); stream=0 = 1280x720 (IDR corrupt in right quarter)
+                  device_sn: str, channel: int = 1, stream: int = 0) -> str:  # stream=0 = 1280x720 main/HD; stream=1 = 352x288 sub-stream
     """Return the plain (unencrypted) relay URL for the VTO camera."""
     append_url = f"/real/{channel}/{stream}/RTSV1"
     body_obj   = {"params": {
@@ -335,7 +335,7 @@ class RtpDeinterleaver:
 
 class StreamProxy:
     def __init__(self, bearer_token: str, pcs_username: str, device_sn: str,
-                 channel: int = 1, stream: int = 1, width: int = 640, quality: int = 5):
+                 channel: int = 1, stream: int = 0, width: int = 0, quality: int = 5):
         self.bearer_token  = bearer_token
         self.pcs_username  = pcs_username
         self.device_sn     = device_sn

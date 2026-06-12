@@ -20,8 +20,9 @@ services:
       - DAHUA_DEVICE_PASSWORD=${DAHUA_DEVICE_PASSWORD}
       - DAHUA_CHANNEL=${DAHUA_CHANNEL:-1}
       - DAHUA_DOOR_INDEX=${DAHUA_DOOR_INDEX:-0}
-      # Stream output quality
-      - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-640}
+      # Stream output: STREAM 0=main/HD 1280x720, 1=sub 352x288; WIDTH 0=native
+      - DAHUA_STREAM=${DAHUA_STREAM:-0}
+      - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-0}
       - DAHUA_STREAM_QUALITY=${DAHUA_STREAM_QUALITY:-5}
       # Direct VTH connection (doorbell event subscription)
       - DAHUA_VTH_HOST=${DAHUA_VTH_HOST}
