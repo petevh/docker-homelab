@@ -22,6 +22,9 @@ providers:
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
     network: traefik
+  file:
+    directory: /config/dynamic
+    watch: true
 
 certificatesResolvers:
   cloudflare:

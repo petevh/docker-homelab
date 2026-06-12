@@ -25,7 +25,9 @@ docker-homelab/
 │   ├── .env.example
 │   └── config/
 │       ├── traefik.yml          # Static config
-│       └── dynamic/             # Dynamic config files
+│       └── dynamic/             # File provider configs (non-Docker upstreams)
+│           ├── homeassistant.yml
+│           └── omada.yml
 ├── n8n/
 │   ├── docker-compose.yml
 │   └── .env.example
@@ -55,6 +57,10 @@ Docker network: traefik (internal bridge)
     ├── portainer    (portainer.app.vanheerden.ch)
     ├── actual       (actual.app.vanheerden.ch)
     └── paperless    (paperless.app.vanheerden.ch) [planned]
+
+File provider (non-Docker upstreams via config/dynamic/)
+    ├── ha           (ha.app.vanheerden.ch → 192.168.40.51:8123)
+    └── omada        (omada.app.vanheerden.ch → 192.168.99.50:8043)
 ```
 
 ## Traefik Configuration
@@ -78,6 +84,8 @@ labels:
 ```
 
 **No DNS changes needed** when adding new containers — wildcard DNS already covers `*.app.vanheerden.ch`.
+
+**File provider** (`config/dynamic/`): used for non-Docker upstreams (other VMs, physical hosts). Add a new `.yml` file — Traefik hot-reloads it without restart (`watch: true`). For upstream HTTPS with a self-signed cert, set `serversTransport.insecureSkipVerify: true`.
 
 ## Running Services
 
@@ -103,6 +111,19 @@ labels:
 - **Role:** Personal finance / budgeting
 - **URL:** `actual.app.vanheerden.ch`
 - **Note:** No webhook/callback URLs — no HOST/PROTOCOL env vars needed
+
+### Home Assistant
+- **Role:** Home automation
+- **URL:** `ha.app.vanheerden.ch`
+- **Upstream:** `http://192.168.40.51:8123` (haOS VM, separate VLAN)
+- **Config:** `traefik/config/dynamic/homeassistant.yml` (file provider)
+- **Note:** Requires `http.use_x_forwarded_for: true` and `trusted_proxies: 192.168.20.203` in HA's `configuration.yaml`
+
+### Omada Controller
+- **Role:** TP-Link Omada network controller (APs, switches)
+- **URL:** `omada.app.vanheerden.ch`
+- **Upstream:** `https://192.168.99.50:8043` (self-signed cert — `insecureSkipVerify: true`)
+- **Config:** `traefik/config/dynamic/omada.yml` (file provider)
 
 ### Paperless-ngx (planned)
 - **Role:** Document management with OCR

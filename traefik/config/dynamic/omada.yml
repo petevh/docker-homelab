@@ -1,0 +1,20 @@
+http:
+  routers:
+    omada:
+      rule: "Host(`omada.app.vanheerden.ch`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: omada
+
+  services:
+    omada:
+      loadBalancer:
+        serversTransport: omada-transport
+        servers:
+          - url: "https://192.168.99.50:8043"
+
+  serversTransports:
+    omada-transport:
+      insecureSkipVerify: true
