@@ -36,17 +36,23 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from dahua_client import (
+    Credentials,
     DahuaError,
     StreamProxy,
     subscribe_events,
     unlock_door,
+    with_bearer_retry,
 )
 
 # ---------------------------------------------------------------------------
 # Config — all values from environment, no defaults for secrets
 # ---------------------------------------------------------------------------
 API_KEY          = os.environ.get("DAHUA_API_KEY", "")
-BEARER_TOKEN     = os.environ.get("DAHUA_BEARER_TOKEN", "")
+BEARER_TOKEN     = os.environ.get("DAHUA_BEARER_TOKEN", "")   # optional static token (fallback)
+ACCOUNT          = os.environ.get("DAHUA_ACCOUNT", "")        # cloud login (preferred: self-refreshing)
+ACCOUNT_PASSWORD = os.environ.get("DAHUA_ACCOUNT_PASSWORD", "")
+AREA_CODE        = os.environ.get("DAHUA_AREA_CODE", "971")
+COUNTRY          = os.environ.get("DAHUA_COUNTRY", "AE")
 PCS_USERNAME     = os.environ.get("DAHUA_PCS_USERNAME", "")
 DEVICE_SN        = os.environ.get("DAHUA_DEVICE_SN", "")
 DEVICE_USERNAME  = os.environ.get("DAHUA_DEVICE_USERNAME", "user")
@@ -69,6 +75,16 @@ log = logging.getLogger("dahua_api")
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
+# Shared credential holder — prefers cloud account login (self-refreshing Bearer);
+# falls back to a static DAHUA_BEARER_TOKEN if no account credentials are set.
+_creds = Credentials(
+    bearer=BEARER_TOKEN,
+    pcs_username=PCS_USERNAME,
+    account=ACCOUNT,
+    password=ACCOUNT_PASSWORD,
+    area_code=AREA_CODE,
+    country=COUNTRY,
+)
 _stream_proxy: Optional[StreamProxy] = None
 _ring_listeners: list[asyncio.Queue] = []
 _ring_listeners_lock = threading.Lock()
@@ -117,8 +133,14 @@ async def lifespan(app: FastAPI):
 
     if not API_KEY:
         log.warning("DAHUA_API_KEY is not set — all requests are unauthenticated.")
+    if not _creds.can_refresh and not BEARER_TOKEN:
+        log.warning("No DAHUA_ACCOUNT/DAHUA_ACCOUNT_PASSWORD and no DAHUA_BEARER_TOKEN — "
+                    "cloud unlock/stream calls will fail.")
+    elif _creds.can_refresh:
+        log.info("Cloud auth: account login (self-refreshing Bearer) for %s", ACCOUNT)
+    else:
+        log.info("Cloud auth: static DAHUA_BEARER_TOKEN (will not self-refresh)")
     for var, name in [
-        (BEARER_TOKEN, "DAHUA_BEARER_TOKEN"),
         (PCS_USERNAME, "DAHUA_PCS_USERNAME"),
         (DEVICE_SN,    "DAHUA_DEVICE_SN"),
         (DEVICE_PASSWORD, "DAHUA_DEVICE_PASSWORD"),
@@ -126,10 +148,10 @@ async def lifespan(app: FastAPI):
         if not var:
             log.warning("%s is not set — unlock/stream calls will fail.", name)
 
-    if BEARER_TOKEN and PCS_USERNAME and DEVICE_SN:
+    has_bearer = BEARER_TOKEN or _creds.can_refresh
+    if has_bearer and PCS_USERNAME and DEVICE_SN:
         _stream_proxy = StreamProxy(
-            bearer_token=BEARER_TOKEN,
-            pcs_username=PCS_USERNAME,
+            creds=_creds,
             device_sn=DEVICE_SN,
             channel=CHANNEL,
             stream=STREAM,
@@ -210,15 +232,15 @@ def unlock(auth=Depends(verify_api_key)):
     """
     log.info("Unlock request → device %s", DEVICE_SN)
     try:
-        result = unlock_door(
-            bearer_token=BEARER_TOKEN,
+        result = with_bearer_retry(_creds, lambda b: unlock_door(
+            bearer_token=b,
             pcs_username=PCS_USERNAME,
             device_sn=DEVICE_SN,
             device_username=DEVICE_USERNAME,
             device_password=DEVICE_PASSWORD,
             channel=CHANNEL,
             door_index=DOOR_INDEX,
-        )
+        ))
         if result:
             log.info("Unlock successful")
             return UnlockResponse(success=True, message="Door unlocked")

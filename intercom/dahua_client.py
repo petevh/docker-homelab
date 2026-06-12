@@ -60,6 +60,144 @@ class DahuaError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Cloud login — mint a fresh OAuth Bearer (accessToken) from account creds
+# Reverse-engineered from DMSS (usermodule.signup.b + StringUtils + EncryptUtilKt),
+# verified byte-for-byte vs captured login traffic. Lets the service self-refresh
+# its Bearer instead of relying on a captured/hardcoded token.
+# ---------------------------------------------------------------------------
+
+GATEWAY_BASE   = "https://dmss.dolynkcloud.com"
+LOGIN_IV       = b"0a52uuEvqlOLc5TO"
+
+
+def _get_account_passwd(password: str) -> str:
+    key = hashlib.md5(b"DAHUAKEY").hexdigest().lower().encode()       # AES-256 key
+    msg = hashlib.md5(password.encode()).hexdigest().lower().encode()
+    ct  = AES.new(key, AES.MODE_CBC, LOGIN_IV).encrypt(pad(msg, 16))
+    return base64.b64encode(ct).decode().rstrip("=")
+
+
+def _login_password(password: str, salt: str, random: str) -> str:
+    def h(k, m): return _hmac.new(k.encode(), m.encode(), hashlib.sha512).hexdigest()
+    return h(random, h(salt, _get_account_passwd(password)))
+
+
+def _dd_headers(account: str, area_code: str, country: str, terminal_id: str) -> dict:
+    return {
+        "x-dd-time":          str(int(time.time() * 1000)),
+        "x-dd-nonce":         secrets.token_hex(16),
+        "x-dd-clientversion": "2.5.10",
+        "x-dd-clienttype":    "phone",
+        "x-dd-client":        "Android",
+        "x-dd-traceid":       secrets.token_hex(16),
+        "x-dd-transcode":     "dmss",
+        "x-dd-account":       account,
+        "x-dd-country":       country,
+        "x-dd-projectid":     "Base",
+        "x-dd-language":      "en-US",
+        "x-dd-terminalid":    terminal_id,
+        "x-dd-signature":     "",            # not required for getSalt/login
+        "content-type":       "application/json",
+        "user-agent":         "okhttp/4.12.0",
+    }
+
+
+def refresh_bearer(account: str, password: str, area_code: str = "971",
+                   country: str = "AE", terminal_id: str = "1a063af88b462024",
+                   terminal_name: str = "intercom") -> str:
+    """Log in with account credentials and return a fresh accessToken (Bearer)."""
+    r = requests.post(f"{GATEWAY_BASE}/gateway/dcloud-user/userManage/v1/getSalt",
+                      headers=_dd_headers(account, area_code, country, terminal_id),
+                      data=json.dumps({"account": account, "areaCode": area_code}),
+                      timeout=20)
+    r.raise_for_status()
+    d = r.json()
+    if str(d.get("code")) != "0":
+        raise DahuaError(f"getSalt failed: {d}")
+    salt, random = d["data"]["salt"], d["data"]["random"]
+
+    body = {
+        "account": account,
+        "areaCode": area_code,
+        "multiTerminalValidationFlag": True,
+        "oldPassword": _get_account_passwd(password),
+        "password": _login_password(password, salt, random),
+        "terminalName": terminal_name,
+    }
+    r = requests.post(f"{GATEWAY_BASE}/gateway/dcloud-user/userManage/v1/login",
+                      headers=_dd_headers(account, area_code, country, terminal_id),
+                      data=json.dumps(body), timeout=20)
+    r.raise_for_status()
+    d = r.json()
+    if str(d.get("code")) != "0":
+        raise DahuaError(f"login failed: {d}")
+    return d["data"]["accessToken"]
+
+
+class Credentials:
+    """Holds the Bearer + pcs_username, refreshing the Bearer from account creds
+    on demand (on first use and after a token-expired failure). Thread-safe.
+
+    If account/password are not provided, falls back to the static `bearer` and
+    cannot self-refresh (refresh() raises).
+    """
+
+    def __init__(self, bearer: str = "", pcs_username: str = "",
+                 account: str = "", password: str = "", area_code: str = "971",
+                 country: str = "AE"):
+        self._lock      = threading.Lock()
+        self.bearer     = bearer
+        self.pcs_username = pcs_username
+        self._account   = account
+        self._password  = password
+        self._area_code = area_code
+        self._country   = country
+
+    @property
+    def can_refresh(self) -> bool:
+        return bool(self._account and self._password)
+
+    def ensure(self) -> str:
+        """Return a Bearer, minting one if we don't have a static one."""
+        with self._lock:
+            if not self.bearer and self.can_refresh:
+                self.bearer = refresh_bearer(self._account, self._password,
+                                             self._area_code, self._country)
+                log.info("Obtained fresh Bearer via account login")
+            return self.bearer
+
+    def refresh(self) -> str:
+        """Force a new Bearer (e.g. after a 401/expired error)."""
+        with self._lock:
+            if not self.can_refresh:
+                raise DahuaError("Bearer expired and no account credentials to refresh it")
+            self.bearer = refresh_bearer(self._account, self._password,
+                                         self._area_code, self._country)
+            log.info("Refreshed Bearer via account login")
+            return self.bearer
+
+
+# Cloud error codes/markers that mean "Bearer expired / not authenticated".
+_AUTH_ERR_MARKERS = ("token", "unauthor", "auth fail", "10002", "10006", "invalid")
+
+
+def _looks_like_auth_error(exc: Exception) -> bool:
+    return any(m in str(exc).lower() for m in _AUTH_ERR_MARKERS)
+
+
+def with_bearer_retry(creds: "Credentials", fn: Callable[[str], object]):
+    """Call fn(bearer); on an auth-looking failure, refresh the Bearer once and retry."""
+    bearer = creds.ensure()
+    try:
+        return fn(bearer)
+    except Exception as e:
+        if creds.can_refresh and _looks_like_auth_error(e):
+            log.warning("Cloud call failed (%s) — refreshing Bearer and retrying", e)
+            return fn(creds.refresh())
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Crypto
 # ---------------------------------------------------------------------------
 
@@ -334,10 +472,9 @@ class RtpDeinterleaver:
 # ---------------------------------------------------------------------------
 
 class StreamProxy:
-    def __init__(self, bearer_token: str, pcs_username: str, device_sn: str,
+    def __init__(self, creds: "Credentials", device_sn: str,
                  channel: int = 1, stream: int = 0, width: int = 0, quality: int = 5):
-        self.bearer_token  = bearer_token
-        self.pcs_username  = pcs_username
+        self.creds         = creds
         self.device_sn     = device_sn
         self.channel       = channel
         self.stream        = stream
@@ -370,10 +507,14 @@ class StreamProxy:
 
     def _run_once(self):
         log.info("Fetching play token...")
-        play_token = get_play_token(self.bearer_token, self.pcs_username)
+        pcs_user = self.creds.pcs_username
+        play_token = with_bearer_retry(
+            self.creds, lambda b: get_play_token(b, pcs_user))
         log.info("Getting relay URL...")
-        relay_url = get_relay_url(play_token, self.bearer_token, self.pcs_username,
-                                  self.device_sn, self.channel, self.stream)
+        relay_url = with_bearer_retry(
+            self.creds,
+            lambda b: get_relay_url(play_token, b, pcs_user,
+                                    self.device_sn, self.channel, self.stream))
         log.info("Relay URL: %s", relay_url)
 
         sock = connect_relay(relay_url)
