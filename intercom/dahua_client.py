@@ -499,30 +499,7 @@ class StreamProxy:
         with self._lock:
             return self._frame
 
-    def _run_loop(self):
-        while self._running:
-            try:
-                self._run_once()
-            except Exception as e:
-                log.warning("Stream error: %s — reconnecting in 5s", e)
-                time.sleep(5)
-
-    def _run_once(self):
-        log.info("Fetching play token...")
-        pcs_user = self.creds.pcs_username
-        play_token = with_bearer_retry(
-            self.creds, lambda b: get_play_token(b, pcs_user))
-        log.info("Getting relay URL...")
-        relay_url = with_bearer_retry(
-            self.creds,
-            lambda b: get_relay_url(play_token, b, pcs_user,
-                                    self.device_sn, self.channel, self.stream))
-        log.info("Relay URL: %s", relay_url)
-
-        sock = connect_relay(relay_url)
-        sock.settimeout(10)
-        log.info("Connected to relay — starting ffmpeg")
-
+    def _ffmpeg_cmd(self):
         # Single ffmpeg, two outputs from the de-interleaved DHAV stream:
         #   1. RTSP passthrough to mediamtx: H264 copied (full fps, no re-encode),
         #      PCM audio transcoded to AAC. This is the smooth, low-latency feed.
@@ -530,9 +507,9 @@ class StreamProxy:
         # ffmpeg's dhav demuxer separates video+audio itself, so we feed the whole
         # (de-interleaved) DHAV stream rather than hand-extracting H264.
         scale = f"scale={self.width}:-2," if self.width else ""
-        ffmpeg_cmd = [
+        return [
             "ffmpeg", "-loglevel", "warning",
-            "-fflags", "+genpts",
+            "-fflags", "+genpts+nobuffer",
             "-f", "dhav", "-i", "pipe:0",
             # Output 1: RTSP (H264 passthrough + AAC audio)
             "-map", "0:v:0", "-map", "0:a:0?",
@@ -544,71 +521,103 @@ class StreamProxy:
             "-q:v", str(self.quality), "-r", "5",
             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
         ]
-        proc = subprocess.Popen(
-            ffmpeg_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,  # inherit — goes to container logs
-        )
 
-        def feed():
-            # Feed the de-interleaved DHAV stream to ffmpeg, starting on the first
-            # keyframe (0xfd) so ffmpeg's decoder never starts mid-GOP. We pass the
-            # WHOLE de-interleaved stream (incl. audio frames) verbatim from the first
-            # keyframe onward — ffmpeg's dhav demuxer separates video/audio.
-            deint    = RtpDeinterleaver()
+    def _run_loop(self):
+        # ONE persistent ffmpeg + RTSP publish for the whole lifetime, so the relay's
+        # 50s reconnect cycle does NOT tear down the RTSP stream (clients stay connected).
+        # The relay socket reconnects underneath and keeps feeding the same ffmpeg stdin;
+        # each new relay session is re-synced to a keyframe before its bytes are written.
+        while self._running:
+            proc = subprocess.Popen(
+                self._ffmpeg_cmd(),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=None,  # inherit — goes to container logs
+            )
+            reader = threading.Thread(target=self._read_jpeg, args=(proc,), daemon=True)
+            reader.start()
             try:
-                connect_time = time.time()
-                buf       = b""
-                started   = False   # True once we've emitted from the first keyframe
-
-                while self._running and (time.time() - connect_time < RELAY_TTL):
+                # Feed relay sessions into this ffmpeg until it (or we) dies.
+                while self._running and proc.poll() is None:
                     try:
-                        chunk = sock.recv(65536)
-                    except socket.timeout:
-                        continue
-                    if not chunk:
-                        break
-                    chunk = deint.feed(chunk)   # strip RTP-over-TCP interleave headers
-                    if not chunk:
-                        continue
-                    buf += chunk
-
-                    if not started:
-                        # wait for the first keyframe (0xfd) DHAV frame on a boundary
-                        kf = -1
-                        pos = buf.find(b"DHAV")
-                        while pos >= 0 and pos + 5 <= len(buf):
-                            if buf[pos + 4] == 0xfd:
-                                kf = pos
-                                break
-                            pos = buf.find(b"DHAV", pos + 4)
-                        if kf < 0:
-                            if len(buf) > 1_000_000:   # don't buffer unbounded
-                                buf = buf[-4:]
-                            continue
-                        buf = buf[kf:]
-                        started = True
-
-                    try:
-                        proc.stdin.write(buf)
-                        proc.stdin.flush()
-                        buf = b""
-                    except BrokenPipeError:
-                        break
+                        self._feed_one_relay_session(proc)
+                    except Exception as e:
+                        log.warning("Relay session error: %s — reconnecting in 2s", e)
+                        time.sleep(2)
             finally:
                 try:
                     proc.stdin.close()
                 except Exception:
                     pass
-                sock.close()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                reader.join(timeout=5)
+            if self._running:
+                log.warning("ffmpeg exited — restarting pipeline in 2s")
+                time.sleep(2)
 
-        feeder = threading.Thread(target=feed, daemon=True)
-        feeder.start()
+    def _feed_one_relay_session(self, proc):
+        """Open one relay connection and feed its (de-interleaved, keyframe-synced)
+        DHAV bytes into the persistent ffmpeg's stdin, until the relay TTL expires."""
+        pcs_user = self.creds.pcs_username
+        play_token = with_bearer_retry(self.creds, lambda b: get_play_token(b, pcs_user))
+        relay_url = with_bearer_retry(
+            self.creds,
+            lambda b: get_relay_url(play_token, b, pcs_user,
+                                    self.device_sn, self.channel, self.stream))
+        sock = connect_relay(relay_url)
+        sock.settimeout(10)
+        log.info("Relay session connected (feeding persistent ffmpeg)")
 
+        deint   = RtpDeinterleaver()
+        buf     = b""
+        started = False
+        connect_time = time.time()
+        try:
+            while self._running and proc.poll() is None and \
+                    (time.time() - connect_time < RELAY_TTL):
+                try:
+                    chunk = sock.recv(65536)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                chunk = deint.feed(chunk)
+                if not chunk:
+                    continue
+                buf += chunk
+
+                if not started:
+                    # Each relay session starts mid-GOP; sync to the first keyframe
+                    # (0xfd) so ffmpeg never ingests a partial GOP across reconnects.
+                    kf, pos = -1, buf.find(b"DHAV")
+                    while pos >= 0 and pos + 5 <= len(buf):
+                        if buf[pos + 4] == 0xfd:
+                            kf = pos
+                            break
+                        pos = buf.find(b"DHAV", pos + 4)
+                    if kf < 0:
+                        if len(buf) > 1_000_000:
+                            buf = buf[-4:]
+                        continue
+                    buf = buf[kf:]
+                    started = True
+
+                try:
+                    proc.stdin.write(buf)
+                    proc.stdin.flush()
+                    buf = b""
+                except BrokenPipeError:
+                    break
+        finally:
+            sock.close()
+
+    def _read_jpeg(self, proc):
         buf = b""
         try:
-            while self._running:
+            while self._running and proc.poll() is None:
                 chunk = proc.stdout.read(8192)
                 if not chunk:
                     break
@@ -627,13 +636,8 @@ class StreamProxy:
                     if len(jpeg) > 1000:
                         with self._lock:
                             self._frame = jpeg
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            feeder.join(timeout=5)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
