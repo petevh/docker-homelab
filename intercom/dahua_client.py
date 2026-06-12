@@ -12,6 +12,7 @@ import base64
 import secrets
 import json
 import logging
+import queue
 import re
 import socket
 import struct
@@ -34,7 +35,7 @@ OPENAPI_HOST = "dmss-di.dolynkcloud.com"
 SVN_OPEN_VTH_DOOR = "222387"
 SVN_LOGIN         = "228782"
 
-RELAY_TTL = 50  # reconnect before relay URL expires at 60s
+RELAY_TTL = 62  # relay hard-closes at ~66s (KeepLive-Time 60 + grace); use the full window
 
 CLIENT_UA = (
     "eyJjbGllbnRUeXBlIjoicGhvbmUiLCJjbGllbnRWZXJzaW9uIjoiVjIuNS4xMCIsImNsaWVu"
@@ -467,6 +468,107 @@ class RtpDeinterleaver:
         return bytes(out)
 
 
+class _RelaySession:
+    """One relay connection, pulled in a background thread. De-interleaves the
+    RTP-over-TCP framing and emits only from the first keyframe (0xfd) onward, so a
+    consumer gets a clean keyframe-aligned DHAV byte stream. Used in pairs to overlap
+    relay reconnects (pre-warm the next before the current expires)."""
+
+    def __init__(self, sock: socket.socket, running, held: bool = False):
+        self._sock    = sock
+        self._running = running          # callable -> bool (proxy still alive)
+        self._q: "queue.Queue[bytes]" = queue.Queue(maxsize=256)
+        self._stop    = False
+        self._thread  = None
+        self.dead     = False
+        self._ready   = False            # True once connected + synced to a keyframe
+        self._held    = held             # if True, discard data until release()
+
+    def start(self):
+        self._thread = threading.Thread(target=self._pull, daemon=True)
+        self._thread.start()
+
+    def is_ready(self) -> bool:
+        """True once connected and synced to its first keyframe (safe to switch to)."""
+        return self._ready
+
+    def release(self):
+        """Stop discarding; begin queueing from the NEXT keyframe (clean splice point)."""
+        self._held = False
+
+    def read(self, timeout: float = 0.5):
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def stop(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    def _pull(self):
+        # While held: keep the socket drained and track keyframes, but DON'T queue
+        # (so we don't build a stale backlog to dump at switch time). On release,
+        # start queueing from the next keyframe — a clean GOP boundary for ffmpeg.
+        deint    = RtpDeinterleaver()
+        buf      = b""
+        emitting = False
+        try:
+            while self._running() and not self._stop:
+                try:
+                    chunk = self._sock.recv(65536)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunk = deint.feed(chunk)
+                if not chunk:
+                    continue
+                buf += chunk
+
+                # Find the latest keyframe boundary in buf.
+                kf, pos = -1, buf.find(b"DHAV")
+                while pos >= 0 and pos + 5 <= len(buf):
+                    if buf[pos + 4] == 0xfd:
+                        kf = pos
+                    pos = buf.find(b"DHAV", pos + 4)
+
+                if not emitting:
+                    if kf < 0:
+                        # haven't seen a keyframe yet; cap buffer, keep waiting
+                        if len(buf) > 2_000_000:
+                            buf = buf[-4:]
+                        continue
+                    self._ready = True          # connected & a keyframe is available
+                    if self._held:
+                        # discard everything up to the most recent keyframe, stay aligned
+                        buf = buf[kf:]
+                        # keep only a bounded window so we don't grow unbounded while held
+                        if len(buf) > 2_000_000:
+                            buf = buf[-4:]
+                        continue
+                    # released: start emitting from this keyframe
+                    buf = buf[kf:]
+                    emitting = True
+
+                try:
+                    self._q.put(buf, timeout=1)
+                    buf = b""
+                except queue.Full:
+                    buf = b""        # drop if consumer stalled; keeps us live
+        finally:
+            self.dead = True
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # StreamProxy — manages relay connection + ffmpeg, provides JPEG frames
 # ---------------------------------------------------------------------------
@@ -558,9 +660,10 @@ class StreamProxy:
                 log.warning("ffmpeg exited — restarting pipeline in 2s")
                 time.sleep(2)
 
-    def _feed_one_relay_session(self, proc):
-        """Open one relay connection and feed its (de-interleaved, keyframe-synced)
-        DHAV bytes into the persistent ffmpeg's stdin, until the relay TTL expires."""
+    def _open_relay_session(self, held: bool = False) -> "_RelaySession":
+        """Open + authenticate a relay connection and return a started _RelaySession.
+        If held, the session connects and stays keyframe-aligned but discards data
+        until release() (used to pre-warm the next session without a stale backlog)."""
         pcs_user = self.creds.pcs_username
         play_token = with_bearer_retry(self.creds, lambda b: get_play_token(b, pcs_user))
         relay_url = with_bearer_retry(
@@ -569,50 +672,55 @@ class StreamProxy:
                                     self.device_sn, self.channel, self.stream))
         sock = connect_relay(relay_url)
         sock.settimeout(10)
+        sess = _RelaySession(sock, lambda: self._running, held=held)
+        sess.start()
+        return sess
+
+    def _feed_one_relay_session(self, proc):
+        """Feed relay sessions into the persistent ffmpeg with OVERLAP. The relay
+        hard-closes each connection at ~66s, so we pre-warm the next session a few
+        seconds early (connected + keyframe-aligned, but discarding data). At switch
+        time we release it so it emits fresh from its NEXT keyframe — a clean GOP
+        boundary — and stop the old one. No starvation gap, no stale-backlog dump."""
+        PREWARM_LEAD = 6     # pre-warm the next session this many seconds before TTL
+        active = self._open_relay_session()
+        active.release()     # active emits immediately
         log.info("Relay session connected (feeding persistent ffmpeg)")
-
-        deint   = RtpDeinterleaver()
-        buf     = b""
-        started = False
-        connect_time = time.time()
+        nxt = None
+        start_t = time.time()
         try:
-            while self._running and proc.poll() is None and \
-                    (time.time() - connect_time < RELAY_TTL):
-                try:
-                    chunk = sock.recv(65536)
-                except socket.timeout:
-                    continue
-                if not chunk:
-                    break
-                chunk = deint.feed(chunk)
-                if not chunk:
-                    continue
-                buf += chunk
+            while self._running and proc.poll() is None:
+                age = time.time() - start_t
 
-                if not started:
-                    # Each relay session starts mid-GOP; sync to the first keyframe
-                    # (0xfd) so ffmpeg never ingests a partial GOP across reconnects.
-                    kf, pos = -1, buf.find(b"DHAV")
-                    while pos >= 0 and pos + 5 <= len(buf):
-                        if buf[pos + 4] == 0xfd:
-                            kf = pos
-                            break
-                        pos = buf.find(b"DHAV", pos + 4)
-                    if kf < 0:
-                        if len(buf) > 1_000_000:
-                            buf = buf[-4:]
-                        continue
-                    buf = buf[kf:]
-                    started = True
+                if nxt is None and age >= RELAY_TTL - PREWARM_LEAD:
+                    try:
+                        nxt = self._open_relay_session(held=True)   # pre-warm, discarding
+                    except Exception as e:
+                        log.warning("Pre-warm failed: %s", e)
 
+                # Switch once we're at TTL and the next session is connected+aligned.
+                if nxt is not None and age >= RELAY_TTL and nxt.is_ready():
+                    nxt.release()          # start emitting from its next keyframe
+                    active.stop()
+                    active = nxt
+                    nxt = None
+                    start_t = time.time()
+                    log.info("Switched to pre-warmed relay session (seamless)")
+
+                data = active.read(timeout=0.5)
+                if data is None:
+                    if active.dead:
+                        break          # active died with no replacement → reconnect
+                    continue
                 try:
-                    proc.stdin.write(buf)
+                    proc.stdin.write(data)
                     proc.stdin.flush()
-                    buf = b""
                 except BrokenPipeError:
                     break
         finally:
-            sock.close()
+            active.stop()
+            if nxt is not None:
+                nxt.stop()
 
     def _read_jpeg(self, proc):
         buf = b""
