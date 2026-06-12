@@ -274,6 +274,11 @@ def connect_relay(relay_url: str) -> socket.socket:
             break
         sdp += chunk
 
+    # Consume only the FIRST 16-byte transport prefix (4-byte interleave header +
+    # 12-byte RTP header). The stream is RTP-over-TCP interleaved: every ~1456-byte
+    # chunk carries another such header. RtpDeinterleaver strips the rest in the
+    # feed loop — they must be removed BEFORE the DHAV/H264 parsing, or the embedded
+    # header bytes corrupt the picture (grey/ghosty, desync at MB row 1).
     prefix = b""
     while len(prefix) < 16:
         chunk = sock.recv(16 - len(prefix))
@@ -282,6 +287,46 @@ def connect_relay(relay_url: str) -> socket.socket:
         prefix += chunk
 
     return sock
+
+
+class RtpDeinterleaver:
+    """De-interleaves the relay's RTP-over-TCP stream into a pure DHAV/H264 byte stream.
+
+    Each interleaved chunk is `0x24 channel(1) length(2BE)` + 12-byte RTP header +
+    payload. connect_relay() already consumed the first 16-byte header, so the stream
+    begins mid-payload; we emit those leading bytes verbatim, then for every subsequent
+    interleave header strip the 4-byte interleave + 12-byte RTP and keep the payload.
+    """
+
+    def __init__(self):
+        self._buf = b""
+
+    def feed(self, data: bytes) -> bytes:
+        self._buf += data
+        out = bytearray()
+        i = 0
+        n = len(self._buf)
+        while i < n:
+            if self._buf[i] == 0x24 and i + 4 <= n and self._buf[i + 1] < 4:
+                length = int.from_bytes(self._buf[i + 2:i + 4], "big")
+                if i + 4 + length > n:
+                    break  # incomplete chunk; wait for more data
+                chunk = self._buf[i + 4:i + 4 + length]
+                if len(chunk) >= 12 and chunk[0] in (0x80, 0x90):
+                    out += chunk[12:]  # strip 12-byte RTP header
+                else:
+                    out += chunk
+                i += 4 + length
+            else:
+                nxt = self._buf.find(b"\x24", i + 1)
+                if nxt < 0:
+                    out += self._buf[i:]
+                    i = n
+                else:
+                    out += self._buf[i:nxt]
+                    i = nxt
+        self._buf = self._buf[i:]
+        return bytes(out)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +409,7 @@ class StreamProxy:
             H264_TYPES = {0xfd, 0xfc}
             DHAV_HDR    = 32
             SUBHDR      = 8
+            deint       = RtpDeinterleaver()   # strip RTP-over-TCP interleave headers
             try:
                 connect_time = time.time()
                 buf         = b""
@@ -377,6 +423,9 @@ class StreamProxy:
                         continue
                     if not chunk:
                         break
+                    chunk = deint.feed(chunk)   # de-interleave before DHAV parsing
+                    if not chunk:
+                        continue
                     buf += chunk
 
                     out = b""

@@ -9,39 +9,29 @@ analysis is in `DahuaConsole/NEXT_STEPS.md` — read it before touching this ser
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `/unlock` | **Working** | Cloud API via `dmss-di.dolynkcloud.com` |
-| `/frame` | **Partially working** | Decodes but right ~25% of image is corrupt — see Stream Quality Issue below |
-| `/stream` | **Partially working** | Same corruption as `/frame` |
+| `/frame` | **Working** | Clean full-frame JPEG (RTP de-interleave fix, 2026-06-12) |
+| `/stream` | **Working** | Clean MJPEG |
 | `/events` | **Working** | SSE stream fires on doorbell ring via direct DHIP to VTH |
-| HA generic_camera | Blocked | Waiting on stream quality fix |
+| HA generic_camera | Ready to wire | Stream quality fixed |
 | HA webhook trigger | Ready to wire | Consume `/events` SSE |
 
-## Stream Quality Issue (BLOCKING)
+## Stream Quality Issue — SOLVED (2026-06-12)
 
-The VTO camera stream decodes with a permanently corrupt right quarter (~25% width, grey/noisy).
-This is a **camera firmware bug** — the H264 IDR (keyframe) has corrupt macroblocks starting
-at column 21 (`ffmpeg: negative number of zero coeffs at 21 1`). Both 1280x720 main stream
-and 352x288 sub-stream are affected.
+The earlier "corrupt right quarter / camera firmware bug" diagnosis was **WRONG**. The actual
+cause: the relay delivers the DHAV/H264 stream as **RTP-over-TCP interleaved**, and
+`connect_relay()` only stripped the *first* 16-byte header. Every subsequent ~1456-byte chunk
+carries another `0x24 chan len` (4-byte interleave) + 12-byte RTP header, which stayed embedded
+in the H264 we fed ffmpeg. Those bytes every 1456B desync EVERY decoder (ffmpeg, VLC,
+gstreamer, even Android MediaCodec) at the first chunk boundary → MB row 1 → grey/ghosty
+picture. DMSS looks fine because it de-interleaves the RTP properly.
 
-DMSS looks fine because it never disconnects — P-frames accumulate and overwrite the corrupt
-IDR region within seconds. Our proxy reconnects every 50s (relay URL expiry) which resets
-the H264 decode state and re-exposes the corrupt IDR every time.
+**Fix:** `RtpDeinterleaver` in `dahua_client.py` strips the 4-byte interleave + 12-byte RTP
+header from every chunk in the feed loop, BEFORE the DHAV/H264 parsing. Verified: clean
+full-frame decode, 0 ffmpeg errors. Full diagnosis in `DahuaConsole/NEXT_STEPS.md`.
 
-**This is still a research problem, not just an implementation problem.**
-
-### Possible fixes to investigate:
-
-1. **Capture HD stream with PCAPdroid + keylog while DMSS views VTO live video** — does
-   DMSS receive the same corrupt IDR, or does the relay deliver something different?
-   All previous captures were sub-stream only.
-
-2. **Request fresh IDR mid-stream** — if there's a keep-alive or RTCP feedback command
-   that triggers the camera to send a new keyframe, we could do it right after connect.
-   See the relay `KeepLive-Time: 60` header — there may be a companion request.
-
-3. **Workaround: don't reconnect via relay URL refresh** — instead of reconnecting the
-   relay TCP connection every 50s, investigate whether the relay connection can be kept
-   alive longer (e.g. by sending keep-alive packets), so P-frames cover the corrupt IDR
-   once and stay covered.
+It was never encrypted, never a camera bug, never a reconnect/IDR issue — purely the embedded
+transport headers. (`-f h264` input with this service's own DHAV frame extraction is fine once
+the stream is de-interleaved first.)
 
 
 ## Unlock — How It Works
