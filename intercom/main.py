@@ -68,6 +68,8 @@ VTH_PASSWORD     = os.environ.get("DAHUA_VTH_PASSWORD", "")
 STREAM           = int(os.environ.get("DAHUA_STREAM", "0"))        # 0 = main/HD 1280x720, 1 = sub 352x288
 STREAM_WIDTH     = int(os.environ.get("DAHUA_STREAM_WIDTH", "0"))   # 0 = native resolution
 STREAM_QUALITY   = int(os.environ.get("DAHUA_STREAM_QUALITY", "5"))
+RTSP_PUBLISH_URL = os.environ.get("DAHUA_RTSP_PUBLISH_URL",
+                                  "rtsp://127.0.0.1:8554/frontdoor")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dahua_api")
@@ -157,9 +159,10 @@ async def lifespan(app: FastAPI):
             stream=STREAM,
             width=STREAM_WIDTH,
             quality=STREAM_QUALITY,
+            rtsp_publish_url=RTSP_PUBLISH_URL,
         )
         _stream_proxy.start()
-        log.info("Stream proxy started")
+        log.info("Stream proxy started (RTSP: %s)", RTSP_PUBLISH_URL)
 
     _start_event_monitor()
 

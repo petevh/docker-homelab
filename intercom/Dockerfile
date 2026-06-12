@@ -2,14 +2,30 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# mediamtx — lightweight RTSP server for the H264 passthrough feed
+ARG MEDIAMTX_VERSION=1.9.3
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "$ARCH" in \
+         amd64) MTX_ARCH=linux_amd64 ;; \
+         arm64) MTX_ARCH=linux_arm64v8 ;; \
+         *) echo "unsupported arch $ARCH" && exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/mediamtx_v${MEDIAMTX_VERSION}_${MTX_ARCH}.tar.gz" \
+       | tar -xz -C /usr/local/bin mediamtx \
+    && chmod +x /usr/local/bin/mediamtx
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY mediamtx.yml /app/mediamtx.yml
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 COPY main.py .
 COPY dahua_client.py .
 
-EXPOSE 8000
+EXPOSE 8000 8554
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/entrypoint.sh"]

@@ -473,13 +473,15 @@ class RtpDeinterleaver:
 
 class StreamProxy:
     def __init__(self, creds: "Credentials", device_sn: str,
-                 channel: int = 1, stream: int = 0, width: int = 0, quality: int = 5):
-        self.creds         = creds
-        self.device_sn     = device_sn
-        self.channel       = channel
-        self.stream        = stream
-        self.width         = width
-        self.quality       = quality
+                 channel: int = 1, stream: int = 0, width: int = 0, quality: int = 5,
+                 rtsp_publish_url: str = "rtsp://127.0.0.1:8554/frontdoor"):
+        self.creds            = creds
+        self.device_sn        = device_sn
+        self.channel          = channel
+        self.stream           = stream
+        self.width            = width
+        self.quality          = quality
+        self.rtsp_publish_url = rtsp_publish_url
         self._lock         = threading.Lock()
         self._frame: bytes = b""
         self._running      = False
@@ -521,16 +523,26 @@ class StreamProxy:
         sock.settimeout(10)
         log.info("Connected to relay — starting ffmpeg")
 
+        # Single ffmpeg, two outputs from the de-interleaved DHAV stream:
+        #   1. RTSP passthrough to mediamtx: H264 copied (full fps, no re-encode),
+        #      PCM audio transcoded to AAC. This is the smooth, low-latency feed.
+        #   2. MJPEG snapshots to pipe:1 for the /frame still-image endpoint.
+        # ffmpeg's dhav demuxer separates video+audio itself, so we feed the whole
+        # (de-interleaved) DHAV stream rather than hand-extracting H264.
         scale = f"scale={self.width}:-2," if self.width else ""
         ffmpeg_cmd = [
             "ffmpeg", "-loglevel", "warning",
-            "-f", "h264",
-            "-i", "pipe:0",
+            "-fflags", "+genpts",
+            "-f", "dhav", "-i", "pipe:0",
+            # Output 1: RTSP (H264 passthrough + AAC audio)
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "copy", "-c:a", "aac", "-ar", "16000", "-b:a", "32k",
+            "-f", "rtsp", "-rtsp_transport", "tcp", self.rtsp_publish_url,
+            # Output 2: MJPEG snapshots
+            "-map", "0:v:0",
             "-vf", f"{scale}format=yuvj420p",
-            "-q:v", str(self.quality),
-            "-f", "image2pipe", "-vcodec", "mjpeg",
-            "-r", "5",
-            "pipe:1",
+            "-q:v", str(self.quality), "-r", "5",
+            "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
         ]
         proc = subprocess.Popen(
             ffmpeg_cmd,
@@ -540,22 +552,15 @@ class StreamProxy:
         )
 
         def feed():
-            # DHAV frame types interleaved in stream:
-            #   0xfd — H264 SPS+PPS+IDR keyframe (every ~1s)
-            #   0xfc — H264 P-frame
-            #   0xf0 — Dahua proprietary (not H264) — must be skipped
-            # Each H264 frame has an 8-byte sub-header before the H264 start code.
-            # We extract raw Annex-B H264 and buffer until we see a complete IDR
-            # before feeding to ffmpeg, to avoid partial-GOP decode corruption.
-            H264_TYPES = {0xfd, 0xfc}
-            DHAV_HDR    = 32
-            SUBHDR      = 8
-            deint       = RtpDeinterleaver()   # strip RTP-over-TCP interleave headers
+            # Feed the de-interleaved DHAV stream to ffmpeg, starting on the first
+            # keyframe (0xfd) so ffmpeg's decoder never starts mid-GOP. We pass the
+            # WHOLE de-interleaved stream (incl. audio frames) verbatim from the first
+            # keyframe onward — ffmpeg's dhav demuxer separates video/audio.
+            deint    = RtpDeinterleaver()
             try:
                 connect_time = time.time()
-                buf         = b""
-                idr_buf     = b""   # accumulate H264 until IDR seen
-                idr_seen    = False
+                buf       = b""
+                started   = False   # True once we've emitted from the first keyframe
 
                 while self._running and (time.time() - connect_time < RELAY_TTL):
                     try:
@@ -564,45 +569,33 @@ class StreamProxy:
                         continue
                     if not chunk:
                         break
-                    chunk = deint.feed(chunk)   # de-interleave before DHAV parsing
+                    chunk = deint.feed(chunk)   # strip RTP-over-TCP interleave headers
                     if not chunk:
                         continue
                     buf += chunk
 
-                    out = b""
-                    pos = 0
-                    while True:
-                        start = buf.find(b"DHAV", pos)
-                        if start < 0:
-                            buf = buf[-3:]
-                            break
-                        if start + DHAV_HDR + SUBHDR > len(buf):
-                            buf = buf[start:]
-                            break
-                        frame_type = buf[start + 4]
-                        next_start = buf.find(b"DHAV", start + 4)
-                        if next_start < 0:
-                            buf = buf[start:]
-                            break
+                    if not started:
+                        # wait for the first keyframe (0xfd) DHAV frame on a boundary
+                        kf = -1
+                        pos = buf.find(b"DHAV")
+                        while pos >= 0 and pos + 5 <= len(buf):
+                            if buf[pos + 4] == 0xfd:
+                                kf = pos
+                                break
+                            pos = buf.find(b"DHAV", pos + 4)
+                        if kf < 0:
+                            if len(buf) > 1_000_000:   # don't buffer unbounded
+                                buf = buf[-4:]
+                            continue
+                        buf = buf[kf:]
+                        started = True
 
-                        if frame_type in H264_TYPES:
-                            h264 = buf[start + DHAV_HDR + SUBHDR:next_start]
-                            if not idr_seen:
-                                # Buffer until we see a complete IDR (0xfd frame)
-                                if frame_type == 0xfd:
-                                    idr_seen = True
-                                    out = h264
-                                # else: discard P-frames before first IDR
-                            else:
-                                out += h264
-                        pos = next_start
-
-                    if out:
-                        try:
-                            proc.stdin.write(out)
-                            proc.stdin.flush()
-                        except BrokenPipeError:
-                            break
+                    try:
+                        proc.stdin.write(buf)
+                        proc.stdin.flush()
+                        buf = b""
+                    except BrokenPipeError:
+                        break
             finally:
                 try:
                     proc.stdin.close()

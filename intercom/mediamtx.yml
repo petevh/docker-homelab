@@ -1,0 +1,20 @@
+# Minimal mediamtx config: RTSP server for the front-door H264 passthrough feed.
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP on 8554 (TCP). The proxy publishes to rtsp://127.0.0.1:8554/frontdoor;
+# clients (Home Assistant / go2rtc) read the same URL.
+rtsp: yes
+rtspAddress: :8554
+protocols: [tcp]
+
+# Other protocols off — HA's stream component handles HLS/WebRTC from the RTSP source.
+hls: no
+webrtc: no
+rtmp: no
+srt: no
+
+paths:
+  frontdoor:
+    # published to by the proxy's ffmpeg; no auth (container-internal + LAN behind traefik)
+    source: publisher
