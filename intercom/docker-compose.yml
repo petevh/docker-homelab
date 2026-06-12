@@ -5,10 +5,14 @@ services:
     build: .
     container_name: intercom
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     networks:
       - traefik
     environment:
+      # API auth
       - DAHUA_API_KEY=${DAHUA_API_KEY}
+      # Cloud API (unlock + stream)
       - DAHUA_BEARER_TOKEN=${DAHUA_BEARER_TOKEN}
       - DAHUA_PCS_USERNAME=${DAHUA_PCS_USERNAME}
       - DAHUA_DEVICE_SN=${DAHUA_DEVICE_SN}
@@ -16,6 +20,14 @@ services:
       - DAHUA_DEVICE_PASSWORD=${DAHUA_DEVICE_PASSWORD}
       - DAHUA_CHANNEL=${DAHUA_CHANNEL:-1}
       - DAHUA_DOOR_INDEX=${DAHUA_DOOR_INDEX:-0}
+      # Stream output quality
+      - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-640}
+      - DAHUA_STREAM_QUALITY=${DAHUA_STREAM_QUALITY:-5}
+      # Direct VTH connection (doorbell event subscription)
+      - DAHUA_VTH_HOST=${DAHUA_VTH_HOST}
+      - DAHUA_VTH_PORT=${DAHUA_VTH_PORT:-5000}
+      - DAHUA_VTH_USERNAME=${DAHUA_VTH_USERNAME:-user}
+      - DAHUA_VTH_PASSWORD=${DAHUA_VTH_PASSWORD}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.intercom.rule=Host(`intercom.app.vanheerden.ch`)"
