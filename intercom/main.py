@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import io
+import re
 import wave
 
 from fastapi import (
@@ -57,7 +58,28 @@ from dahua_client import (
 # ---------------------------------------------------------------------------
 # Config — all values from environment, no defaults for secrets
 # ---------------------------------------------------------------------------
-API_KEY          = os.environ.get("DAHUA_API_KEY", "")
+# API keys: named & individually revocable. DAHUA_API_KEYS="pete:abc,maid:def"
+# maps a label → key so you can revoke one person without affecting others, and
+# logs show WHO called. DAHUA_API_KEY (single, unlabelled) still works as a key
+# labelled "default" for backward compatibility. Tailscale remains the network
+# layer; these keys are the per-user application layer.
+def _parse_api_keys() -> dict:
+    keys: dict[str, str] = {}
+    raw = os.environ.get("DAHUA_API_KEYS", "")
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        label, _, key = pair.partition(":")
+        if key:
+            keys[key.strip()] = label.strip() or "unnamed"
+    single = os.environ.get("DAHUA_API_KEY", "")
+    if single:
+        keys.setdefault(single, "default")
+    return keys                       # {key_value: label}
+
+API_KEYS         = _parse_api_keys()
+AUTH_ENABLED     = bool(API_KEYS)
 BEARER_TOKEN     = os.environ.get("DAHUA_BEARER_TOKEN", "")   # optional static token (fallback)
 ACCOUNT          = os.environ.get("DAHUA_ACCOUNT", "")        # cloud login (preferred: self-refreshing)
 ACCOUNT_PASSWORD = os.environ.get("DAHUA_ACCOUNT_PASSWORD", "")
@@ -160,8 +182,11 @@ def _start_event_monitor() -> None:
 async def lifespan(app: FastAPI):
     global _stream_proxy
 
-    if not API_KEY:
-        log.warning("DAHUA_API_KEY is not set — all requests are unauthenticated.")
+    if not AUTH_ENABLED:
+        log.warning("No API keys configured (DAHUA_API_KEYS/DAHUA_API_KEY) — all requests are unauthenticated.")
+    else:
+        log.info("API auth enabled — %d key(s): %s", len(API_KEYS),
+                 ", ".join(sorted(set(API_KEYS.values()))))
     if not _creds.can_refresh and not BEARER_TOKEN:
         log.warning("No DAHUA_ACCOUNT/DAHUA_ACCOUNT_PASSWORD and no DAHUA_BEARER_TOKEN — "
                     "cloud unlock/stream calls will fail.")
@@ -215,12 +240,23 @@ app = FastAPI(
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
+def _label_for(token: Optional[str]) -> Optional[str]:
+    """Return the label for a key, or None if unknown."""
+    return API_KEYS.get(token) if token else None
+
+
 def verify_api_key(request: Request, key: Optional[str] = Security(api_key_header)):
-    if not API_KEY:
-        return
+    """Returns the caller's key label (for logging). Raises 401 on a bad/missing
+    key. If no keys are configured at all, auth is open (returns 'anonymous')."""
+    if not AUTH_ENABLED:
+        return "anonymous"
     token = key or request.query_params.get("key")
-    if token != API_KEY:
+    label = _label_for(token)
+    if label is None:
+        client = request.client.host if request.client else "?"
+        log.warning("401 — invalid/missing API key from %s on %s", client, request.url.path)
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +271,7 @@ class HealthResponse(BaseModel):
     status: str
     device_sn: str
     api_key_configured: bool
+    api_keys_count: int
     stream_running: bool
     events_configured: bool
     talk_configured: bool
@@ -250,7 +287,8 @@ def health():
     return HealthResponse(
         status="ok",
         device_sn=DEVICE_SN,
-        api_key_configured=bool(API_KEY),
+        api_key_configured=AUTH_ENABLED,
+        api_keys_count=len(API_KEYS),
         stream_running=bool(_stream_proxy and _stream_proxy.get_frame()),
         events_configured=bool(VTH_HOST and VTH_PASSWORD),
         talk_configured=_talk_ready(),
@@ -264,7 +302,7 @@ def unlock(auth=Depends(verify_api_key)):
     Trigger door unlock via Dahua P2P cloud API.
     Callable from HA rest_command, n8n, iOS Shortcuts, Tasker, curl.
     """
-    log.info("Unlock request → device %s", DEVICE_SN)
+    log.info("Unlock request by '%s' → device %s", auth, DEVICE_SN)
     try:
         result = with_bearer_retry(_creds, lambda b: unlock_door(
             bearer_token=b,
@@ -412,6 +450,7 @@ async def talk(request: Request, auth=Depends(verify_api_key)):
     if not body:
         raise HTTPException(status_code=400, detail="Empty body — send a WAV or raw 16-bit PCM")
     pcm, rate = _pcm_from_upload(body, request.headers.get("content-type", ""))
+    log.info("Talk (clip) by '%s' — %d bytes @ %d Hz", auth, len(pcm), rate)
 
     if not _talk_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A talk session is already active")
@@ -438,11 +477,13 @@ async def talk_ws(ws: WebSocket):
     (binary messages) while holding the talk button; close to stop. A hard
     max-duration backstop guards a stuck-open mic.
 
-    Auth: pass ?key=<API_KEY> (browsers can't set WS headers). Sample rate via
-    first text message {"rate": 16000} or query ?rate=16000 (default 16000).
+    Auth: pass ?key=<one of the API keys> (browsers can't set WS headers).
+    Sample rate via text message {"rate": 16000} or query ?rate=16000 (default).
     """
-    key = ws.query_params.get("key")
-    if API_KEY and key != API_KEY:
+    label = _label_for(ws.query_params.get("key"))
+    if AUTH_ENABLED and label is None:
+        client = ws.client.host if ws.client else "?"
+        log.warning("401 — invalid/missing API key from %s on /talk/ws", client)
         await ws.close(code=4401)   # unauthorized
         return
     if not _talk_ready():
@@ -453,6 +494,7 @@ async def talk_ws(ws: WebSocket):
         return
 
     await ws.accept()
+    log.info("Talk (push-to-talk) by '%s'", label or "anonymous")
     rate = int(ws.query_params.get("rate", "16000"))
     sess = _new_talk_session()
     try:

@@ -9,8 +9,9 @@ services:
     networks:
       - traefik
     environment:
-      # API auth
-      - DAHUA_API_KEY=${DAHUA_API_KEY}
+      # API auth — named, individually-revocable keys ("label:key,...")
+      - DAHUA_API_KEYS=${DAHUA_API_KEYS:-}
+      - DAHUA_API_KEY=${DAHUA_API_KEY:-}   # legacy single key (optional fallback)
       # Cloud API (unlock + stream)
       - DAHUA_ACCOUNT=${DAHUA_ACCOUNT:-}
       - DAHUA_ACCOUNT_PASSWORD=${DAHUA_ACCOUNT_PASSWORD:-}
