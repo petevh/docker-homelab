@@ -12,18 +12,40 @@ See `DEVNOTES.md` for research background (why cloud API, why not direct DHIP).
 
 | Endpoint | Method | Status | Description |
 |----------|--------|--------|-------------|
-| `/health` | GET | ✅ | Health check |
+| `/health` | GET | ✅ | Health check (no auth) |
 | `/unlock` | POST | ✅ | Trigger door unlock via Dahua P2P cloud |
-| `/stream` | GET | 🚧 | VTO camera stream URL — pending stream research |
-| `/events` | GET (SSE) | 🚧 | Doorbell/motion event stream — not yet started |
+| `/frame` | GET | ✅ | Latest JPEG snapshot from VTO camera |
+| `/stream` | GET | ✅ | MJPEG stream from VTO camera |
+| `/events` | GET (SSE) | ✅ | Doorbell ring event stream |
+| `/talk` | POST | ✅ | Play a WAV/PCM clip out the door speaker (TTS/announce) |
+| `/talk/ws` | WS | ✅ | Live push-to-talk — stream 16-bit PCM frames |
 
 Swagger UI: `https://intercom.app.vanheerden.ch/docs`
+
+## Authentication
+
+All endpoints (except `/health`) require an API key via `X-API-Key` header, or
+`?key=` query param (for the WebSocket / browsers). Keys are **named and
+individually revocable** — set `DAHUA_API_KEYS` as comma-separated `label:key`
+pairs:
+
+```
+DAHUA_API_KEYS=pete:<key1>,partner:<key2>,maid:<key3>
+```
+
+- **Revoke one person** (e.g. the maid): delete their entry, `docker compose up -d`.
+  Everyone else keeps working. Logs show which label called (`Unlock request by 'pete'`).
+- Generate keys with `openssl rand -hex 32`.
+- `DAHUA_API_KEY` (single, unlabelled) is still accepted, logged as label `default`.
+- **Tailscale** remains the network layer (Traefik IP allowlist); these keys are the
+  per-user application layer — useful if the API is ever exposed beyond the tailnet.
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# edit .env — set DAHUA_BEARER_TOKEN, DAHUA_PCS_USERNAME, DAHUA_DEVICE_PASSWORD, DAHUA_API_KEY
+# edit .env — set DAHUA_API_KEYS, DAHUA_PCS_USERNAME, DAHUA_DEVICE_PASSWORD,
+#   and either DAHUA_ACCOUNT/DAHUA_ACCOUNT_PASSWORD (preferred) or DAHUA_BEARER_TOKEN
 docker compose up -d
 ```
 
