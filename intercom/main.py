@@ -8,6 +8,8 @@ POST /unlock          — unlock the door (cloud API)
 GET  /frame           — latest JPEG snapshot from VTO camera
 GET  /stream          — MJPEG multipart stream from VTO camera
 GET  /events          — SSE stream of doorbell ring events
+POST /talk            — play an audio clip (WAV/PCM) out the door speaker
+WS   /talk/ws         — live push-to-talk (stream 16-bit PCM frames)
 GET  /health          — health check
 
 Home Assistant config:
@@ -30,7 +32,13 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Security, Request
+import io
+import wave
+
+from fastapi import (
+    FastAPI, HTTPException, Depends, Security, Request, WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -39,6 +47,8 @@ from dahua_client import (
     Credentials,
     DahuaError,
     StreamProxy,
+    TalkbackSession,
+    play_audio_clip,
     subscribe_events,
     unlock_door,
     with_bearer_retry,
@@ -59,6 +69,8 @@ DEVICE_USERNAME  = os.environ.get("DAHUA_DEVICE_USERNAME", "user")
 DEVICE_PASSWORD  = os.environ.get("DAHUA_DEVICE_PASSWORD", "")
 CHANNEL          = int(os.environ.get("DAHUA_CHANNEL", "1"))
 DOOR_INDEX       = int(os.environ.get("DAHUA_DOOR_INDEX", "0"))
+
+TALK_MAX_SECONDS = float(os.environ.get("DAHUA_TALK_MAX_SECONDS", "180"))  # hard backstop
 
 VTH_HOST         = os.environ.get("DAHUA_VTH_HOST", "")
 VTH_PORT         = int(os.environ.get("DAHUA_VTH_PORT", "5000"))
@@ -90,6 +102,21 @@ _creds = Credentials(
 _stream_proxy: Optional[StreamProxy] = None
 _ring_listeners: list[asyncio.Queue] = []
 _ring_listeners_lock = threading.Lock()
+
+# Only one talk uplink at a time (the device has a single talk channel).
+_talk_lock = threading.Lock()
+
+
+def _talk_ready() -> bool:
+    """True if we have enough config to open a talk session."""
+    return bool((BEARER_TOKEN or _creds.can_refresh) and PCS_USERNAME and DEVICE_SN)
+
+
+def _new_talk_session() -> TalkbackSession:
+    return TalkbackSession(
+        creds=_creds, device_sn=DEVICE_SN, pcs_username=PCS_USERNAME,
+        channel=CHANNEL, max_seconds=TALK_MAX_SECONDS,
+    )
 
 
 def _on_ring(call_id: str, local_time: str) -> None:
@@ -210,6 +237,8 @@ class HealthResponse(BaseModel):
     api_key_configured: bool
     stream_running: bool
     events_configured: bool
+    talk_configured: bool
+    talk_active: bool
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +253,8 @@ def health():
         api_key_configured=bool(API_KEY),
         stream_running=bool(_stream_proxy and _stream_proxy.get_frame()),
         events_configured=bool(VTH_HOST and VTH_PASSWORD),
+        talk_configured=_talk_ready(),
+        talk_active=_talk_lock.locked(),
     )
 
 
@@ -337,3 +368,120 @@ async def events(request: Request, auth=Depends(verify_api_key)):
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# Talkback — push audio UP to the door speaker
+# ---------------------------------------------------------------------------
+
+def _pcm_from_upload(body: bytes, content_type: str) -> tuple[bytes, int]:
+    """Return (16-bit LE mono PCM bytes, sample_rate) from an uploaded body.
+    Accepts a RIFF/WAV (any rate, mono/stereo→mono) or raw 16-bit PCM (assumed
+    16kHz mono, or audio/L16;rate=NNNN)."""
+    if body[:4] == b"RIFF":
+        w = wave.open(io.BytesIO(body), "rb")
+        ch, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        data = w.readframes(w.getnframes())
+        w.close()
+        if width != 2:
+            raise HTTPException(status_code=415, detail="WAV must be 16-bit PCM")
+        if ch == 2:                       # down-mix stereo → mono (take left)
+            import struct as _s
+            s = _s.unpack("<%dh" % (len(data) // 2), data)
+            data = _s.pack("<%dh" % (len(s) // 2), *s[0::2])
+        return data, rate
+    # raw PCM: honor audio/L16;rate=NNNN, else assume 16kHz
+    rate = 16000
+    m = re.search(r"rate=(\d+)", content_type or "")
+    if m:
+        rate = int(m.group(1))
+    return body, rate
+
+
+@app.post("/talk")
+async def talk(request: Request, auth=Depends(verify_api_key)):
+    """Play an audio clip out the door speaker (TTS, announcements, push-a-file).
+
+    Body: a WAV file (any rate) or raw 16-bit LE mono PCM. For raw PCM set
+    Content-Type: audio/L16;rate=16000. Blocks for the clip's real duration.
+    Callable from HA rest_command / curl. One talk session at a time.
+    """
+    if not _talk_ready():
+        raise HTTPException(status_code=503, detail="Talkback not configured (need Bearer/account + DAHUA_PCS_USERNAME + DAHUA_DEVICE_SN)")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body — send a WAV or raw 16-bit PCM")
+    pcm, rate = _pcm_from_upload(body, request.headers.get("content-type", ""))
+
+    if not _talk_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A talk session is already active")
+    try:
+        # run the blocking relay I/O off the event loop
+        frames = await asyncio.to_thread(
+            play_audio_clip, _creds, DEVICE_SN, PCS_USERNAME, pcm, rate,
+            CHANNEL, TALK_MAX_SECONDS,
+        )
+        return {"success": True, "frames": frames,
+                "seconds": round(frames * 640 / 16000, 2)}
+    except DahuaError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        log.error("Talk error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _talk_lock.release()
+
+
+@app.websocket("/talk/ws")
+async def talk_ws(ws: WebSocket):
+    """Live push-to-talk. Open the socket, stream raw 16-bit LE mono PCM frames
+    (binary messages) while holding the talk button; close to stop. A hard
+    max-duration backstop guards a stuck-open mic.
+
+    Auth: pass ?key=<API_KEY> (browsers can't set WS headers). Sample rate via
+    first text message {"rate": 16000} or query ?rate=16000 (default 16000).
+    """
+    key = ws.query_params.get("key")
+    if API_KEY and key != API_KEY:
+        await ws.close(code=4401)   # unauthorized
+        return
+    if not _talk_ready():
+        await ws.close(code=1011)
+        return
+    if not _talk_lock.acquire(blocking=False):
+        await ws.close(code=4409)   # already active
+        return
+
+    await ws.accept()
+    rate = int(ws.query_params.get("rate", "16000"))
+    sess = _new_talk_session()
+    try:
+        await asyncio.to_thread(sess.start)
+        await ws.send_json({"event": "talk_started", "max_seconds": TALK_MAX_SECONDS})
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            if (data := msg.get("bytes")) is not None:
+                await asyncio.to_thread(sess.push, data, rate)
+            elif (text := msg.get("text")) is not None:
+                # control frame, e.g. {"rate":16000} or {"cmd":"stop"}
+                try:
+                    obj = __import__("json").loads(text)
+                    if obj.get("cmd") == "stop":
+                        break
+                    if "rate" in obj:
+                        rate = int(obj["rate"])
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.error("Talk WS error: %s", e)
+    finally:
+        await asyncio.to_thread(sess.close)
+        _talk_lock.release()
+        try:
+            await ws.close()
+        except Exception:
+            pass

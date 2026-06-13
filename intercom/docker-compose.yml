@@ -23,6 +23,8 @@ services:
       - DAHUA_DEVICE_PASSWORD=${DAHUA_DEVICE_PASSWORD}
       - DAHUA_CHANNEL=${DAHUA_CHANNEL:-1}
       - DAHUA_DOOR_INDEX=${DAHUA_DOOR_INDEX:-0}
+      # Talkback (push audio to door speaker); hard backstop against stuck-open mic
+      - DAHUA_TALK_MAX_SECONDS=${DAHUA_TALK_MAX_SECONDS:-180}
       # Stream output: STREAM 0=main/HD 1280x720, 1=sub 352x288; WIDTH 0=native
       - DAHUA_STREAM=${DAHUA_STREAM:-0}
       - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-0}

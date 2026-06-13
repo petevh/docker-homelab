@@ -345,9 +345,16 @@ def get_play_token(bearer_token: str, pcs_username: str) -> str:
 
 
 def get_relay_url(play_token: str, bearer_token: str, pcs_username: str,
-                  device_sn: str, channel: int = 1, stream: int = 0) -> str:  # stream=0 = 1280x720 main/HD; stream=1 = 352x288 sub-stream
-    """Return the plain (unencrypted) relay URL for the VTO camera."""
-    append_url = f"/real/{channel}/{stream}/RTSV1"
+                  device_sn: str, channel: int = 1, stream: int = 0,
+                  encrypt: bool = False) -> str:  # stream=0 = 1280x720 main/HD; stream=1 = 352x288 sub-stream
+    """Return the relay URL for the VTO camera.
+
+    encrypt=True requests the encrypt=2 relay (/encrypt/RTSV1). The video proxy
+    uses encrypt=0 (plaintext DHAV → ffmpeg). Talkback REQUIRES encrypt=2: the
+    device negotiates the talk call as encrypt=2 and silently mutes audio sent on
+    an encrypt=0 session (proven 2026-06-13)."""
+    append_url = f"/real/{channel}/{stream}/encrypt/RTSV1" if encrypt \
+        else f"/real/{channel}/{stream}/RTSV1"
     body_obj   = {"params": {
         "ahEncrypt": False, "token": play_token, "streamId": 0,
         "appendUrl": append_url, "design": "second", "deviceId": device_sn,
@@ -923,3 +930,236 @@ def subscribe_events(
                     on_ring(call_id, local_time)
     finally:
         sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Talkback — push audio UP to the door speaker over the cloud relay
+# ---------------------------------------------------------------------------
+#
+# Fully reverse-engineered + verified at the door (2026-06-13). The recipe:
+#   1. Hold an encrypt=2 video session (precondition: idle door 503s talk, and
+#      an encrypt=0 session silently MUTES the uplink audio).
+#   2. 6-PLAY handshake on the encrypt=2 visualtalk relay (one socket).
+#   3. Push PCMA(G711a) @16000Hz, framed as: DHAV 0xf0 wrapper -> RTP (pt=8,
+#      MARKER bit set) -> 0x24 interleave on channel 10. Pace at ~40ms/frame
+#      (640 samples). Drain the socket while sending (TCP backpressure else).
+# The audio PAYLOAD is plaintext PCMA; encrypt=2 is only the session mode.
+
+TALK_AUDIO_RATE   = 16000      # PCMA sample rate (the SDP's PCMA/16000 was right)
+TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz (capture used 644-sample frames)
+TALK_CHANNEL      = 10         # interleave channel of the uplink
+TALK_PTYPE        = 8          # RTP payload type: PCMA
+TALK_HANDSHAKE = [             # exact 6-PLAY sequence DMSS sends, one socket
+    "trackID=31&method=0",                 # media session
+    "talktype=talk&trackID=64&method=0",   # talk start
+    "trackID=6&method=1",
+    "method=2",                            # uplink open
+    "trackID=31&method=1",
+    "trackID=70&method=3",
+]
+
+
+def _linear_to_alaw(sample: int) -> int:
+    """16-bit signed PCM -> 8-bit A-law (G.711)."""
+    ALAW_MAX = 0x7FFF
+    sign = 0x00 if sample >= 0 else 0x80
+    if sample < 0:
+        sample = -sample
+    if sample > ALAW_MAX:
+        sample = ALAW_MAX
+    if sample >= 256:
+        exponent = 7
+        for exp in range(7, 0, -1):
+            if sample >= (1 << (exp + 7)):
+                exponent = exp
+                break
+        mantissa = (sample >> (exponent + 3)) & 0x0F
+        alaw = (exponent << 4) | mantissa
+    else:
+        alaw = sample >> 4
+    return (alaw ^ 0x55 ^ sign) & 0xFF
+
+
+def _dhav_audio_frame(alaw: bytes, idx: int, ts_base: int) -> bytes:
+    """Wrap PCMA bytes in a Dahua DHAV 0xf0 audio frame (matches DMSS byte-for-byte
+    on the dynamic fields; cosmetic counters need only be monotonic)."""
+    total = 40 + len(alaw) + 8
+    hdr = bytearray(40)
+    hdr[0:4] = b"DHAV"
+    hdr[4]   = 0xf0
+    struct.pack_into("<I", hdr, 8, idx & 0xFFFFFFFF)         # frame seq
+    struct.pack_into("<I", hdr, 12, total)                   # total len
+    struct.pack_into("<I", hdr, 16, ts_base & 0xFFFFFFFF)    # fixed session ts
+    struct.pack_into("<H", hdr, 20, (90 + idx * 20) & 0xFFFF)  # +20/frame
+    hdr[22] = 0x14
+    hdr[23] = (0x17 + idx * 0x15) & 0xFF                     # +0x15/frame
+    hdr[24:32] = bytes((0x83, 0x01, 0x0e, 0x04, 0x95, 0x00, 0x00, 0x00))
+    hdr[32:40] = bytes((0x00, 0x01, 0x00, 0x00, 0xb3, 0x08, 0xfb, 0xa6))  # const sub-hdr
+    return bytes(hdr) + alaw + b"dhav" + struct.pack("<I", total)
+
+
+def _resample_to_16k(samples, src_rate: int):
+    """Crude nearest-sample resample of a 16-bit PCM int list to 16000 Hz."""
+    if src_rate == TALK_AUDIO_RATE:
+        return samples
+    ratio = TALK_AUDIO_RATE / src_rate
+    return [samples[int(i / ratio)] for i in range(int(len(samples) * ratio))]
+
+
+class TalkbackSession:
+    """One talk uplink to the door. Opens the encrypt=2 video-hold + 6-PLAY
+    handshake on start(); feed 16-bit PCM via push() (any rate); close() to stop.
+
+    Thread-safe-ish for one producer. A hard max_seconds backstop guards against
+    a stuck-open mic (matches DMSS's own few-minute cutoff). Use as the engine
+    behind both POST /talk (whole clip) and a streaming push-to-talk endpoint.
+    """
+
+    def __init__(self, creds: "Credentials", device_sn: str, pcs_username: str,
+                 channel: int = 1, max_seconds: float = 180.0):
+        self.creds = creds
+        self.device_sn = device_sn
+        self.pcs_username = pcs_username
+        self.channel = channel
+        self.max_seconds = max_seconds
+        self._sock: Optional[socket.socket] = None
+        self._hold_sock: Optional[socket.socket] = None
+        self._stop = threading.Event()
+        self._drain_thread: Optional[threading.Thread] = None
+        self._idx = 0
+        self._rtp_seq = secrets.randbits(16)
+        self._rtp_ts = secrets.randbits(32)
+        self._ts_base = int(time.time())
+        self._pcm_buf: list[int] = []
+        self._t0 = 0.0
+        self._frames_sent = 0
+        self._opened = False
+
+    # -- relay plumbing -----------------------------------------------------
+    def _open_relay(self, encrypt: bool) -> tuple[str, str, int]:
+        bearer = self.creds.ensure()
+        tok = get_play_token(bearer, self.pcs_username)
+        url = get_relay_url(tok, bearer, self.pcs_username, self.device_sn,
+                            channel=self.channel, stream=0, encrypt=encrypt)
+        hp, path = url.split("/", 1)
+        host, port = hp.rsplit(":", 1)
+        return host, int(port), path, tok
+
+    def start(self):
+        # 1) hold an encrypt=2 video session so the door is a live media session
+        bearer = self.creds.ensure()
+        tok = get_play_token(bearer, self.pcs_username)
+        hold_url = get_relay_url(tok, bearer, self.pcs_username, self.device_sn,
+                                 channel=self.channel, stream=0, encrypt=True)
+        hp, hpath = hold_url.split("/", 1)
+        hhost, hport = hp.rsplit(":", 1)
+        self._hold_sock = socket.create_connection((hhost, int(hport)), timeout=15)
+        self._hold_sock.sendall(
+            (f"PLAY /{hpath}{'&' if '?' in hpath else '?'}trackID=31&method=0 "
+             f"HTTP/1.1\r\nHost: {hhost}:{hport}\r\nAccpet-Sdp: Private\r\n"
+             f"Connection: keep-alive\r\nCseq: 1\r\n\r\n").encode())
+        threading.Thread(target=self._drain, args=(self._hold_sock,), daemon=True).start()
+        time.sleep(3)   # let the media session come up
+
+        # 2) talk relay (its own encrypt=2 session) + 6-PLAY handshake
+        thost, tport, tpath, _ = self._open_relay(encrypt=True)
+        self._sock = socket.create_connection((thost, int(tport)), timeout=15)
+        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sep = "&" if "?" in tpath else "?"
+        for cseq, params in enumerate(TALK_HANDSHAKE, 1):
+            self._sock.sendall(
+                (f"PLAY /{tpath}{sep}{params} HTTP/1.1\r\nHost: {thost}:{tport}\r\n"
+                 f"Accpet-Sdp: Private\r\nConnection: keep-alive\r\nCseq: {cseq}\r\n\r\n").encode())
+            self._sock.settimeout(2.0)
+            try:
+                self._sock.recv(4096)
+            except socket.timeout:
+                pass
+            time.sleep(0.15)
+        # 3) drain the talk socket while we send (else TCP backpressure stalls)
+        self._drain_thread = threading.Thread(target=self._drain, args=(self._sock,),
+                                              daemon=True)
+        self._drain_thread.start()
+        self._t0 = time.monotonic()
+        self._opened = True
+        log.info("Talkback session open (device %s)", self.device_sn)
+
+    def _drain(self, sock):
+        sock.settimeout(0.2)
+        while not self._stop.is_set():
+            try:
+                if not sock.recv(65536):
+                    break
+            except socket.timeout:
+                pass
+            except OSError:
+                break
+
+    # -- audio feed ---------------------------------------------------------
+    def _send_frame(self, samps: list[int]):
+        alaw = bytes(_linear_to_alaw(s) for s in samps)
+        dhav = _dhav_audio_frame(alaw, self._idx, self._ts_base)
+        rtp = struct.pack("!BBHII", 0x80, 0x80 | (TALK_PTYPE & 0x7f),
+                          self._rtp_seq & 0xFFFF, self._rtp_ts & 0xFFFFFFFF,
+                          0x12345678) + dhav
+        frame = struct.pack("!BBH", 0x24, TALK_CHANNEL & 0xFF, len(rtp)) + rtp
+        self._sock.sendall(frame)
+        self._idx += 1
+        self._rtp_seq += 1
+        self._rtp_ts += len(samps)
+        self._frames_sent += 1
+        # pace against an absolute schedule (no drift), realtime 40ms/frame
+        target = self._t0 + self._frames_sent * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
+        d = target - time.monotonic()
+        if d > 0:
+            time.sleep(d)
+
+    def push(self, pcm16: bytes, src_rate: int = TALK_AUDIO_RATE):
+        """Feed 16-bit little-endian mono PCM. Buffers and flushes whole 40ms
+        frames. Resamples to 16kHz if src_rate differs. Honors max_seconds."""
+        if not self._opened or self._stop.is_set():
+            return
+        if time.monotonic() - self._t0 > self.max_seconds:
+            log.warning("Talkback max_seconds reached — stopping")
+            self.close()
+            return
+        samples = list(struct.unpack("<%dh" % (len(pcm16) // 2), pcm16))
+        if src_rate != TALK_AUDIO_RATE:
+            samples = _resample_to_16k(samples, src_rate)
+        self._pcm_buf.extend(samples)
+        while len(self._pcm_buf) >= TALK_FRAME_SAMPLES and not self._stop.is_set():
+            self._send_frame(self._pcm_buf[:TALK_FRAME_SAMPLES])
+            del self._pcm_buf[:TALK_FRAME_SAMPLES]
+
+    def close(self):
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        # flush a final partial frame (padded with a-law silence)
+        if self._opened and self._pcm_buf and self._sock:
+            try:
+                pad_n = TALK_FRAME_SAMPLES - len(self._pcm_buf)
+                self._send_frame(self._pcm_buf + [0] * pad_n)
+            except Exception:
+                pass
+        for s in (self._sock, self._hold_sock):
+            try:
+                if s:
+                    s.close()
+            except Exception:
+                pass
+        log.info("Talkback session closed (%d frames sent)", self._frames_sent)
+
+
+def play_audio_clip(creds: "Credentials", device_sn: str, pcs_username: str,
+                    pcm16: bytes, src_rate: int, channel: int = 1,
+                    max_seconds: float = 180.0) -> int:
+    """Convenience: open a talkback session, push a whole PCM clip, close.
+    Returns the number of frames sent. Blocks for the clip's real duration."""
+    sess = TalkbackSession(creds, device_sn, pcs_username, channel, max_seconds)
+    sess.start()
+    try:
+        sess.push(pcm16, src_rate)
+    finally:
+        sess.close()
+    return sess._frames_sent
