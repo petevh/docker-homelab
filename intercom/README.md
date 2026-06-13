@@ -35,6 +35,9 @@ DAHUA_API_KEYS=pete:<key1>,partner:<key2>,maid:<key3>
 
 - **Revoke one person** (e.g. the maid): delete their entry, `docker compose up -d`.
   Everyone else keeps working. Logs show which label called (`Unlock request by 'pete'`).
+- The caller's label is also returned in the JSON response (`/unlock` and `/talk`
+  include `"by":"pete"`) — so Home Assistant can record *who* unlocked in its
+  logbook from a `rest_command`/`command_line` sensor, no log-scraping needed.
 - Generate keys with `openssl rand -hex 32`.
 - `DAHUA_API_KEY` (single, unlabelled) is still accepted, logged as label `default`.
 - **Tailscale** remains the network layer (Traefik IP allowlist); these keys are the

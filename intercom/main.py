@@ -265,6 +265,7 @@ def verify_api_key(request: Request, key: Optional[str] = Security(api_key_heade
 class UnlockResponse(BaseModel):
     success: bool
     message: str
+    by: str = ""          # caller's API-key label (for HA logbook / audit)
 
 
 class HealthResponse(BaseModel):
@@ -314,8 +315,8 @@ def unlock(auth=Depends(verify_api_key)):
             door_index=DOOR_INDEX,
         ))
         if result:
-            log.info("Unlock successful")
-            return UnlockResponse(success=True, message="Door unlocked")
+            log.info("Unlock successful (by '%s')", auth)
+            return UnlockResponse(success=True, message="Door unlocked", by=auth)
         raise HTTPException(status_code=502, detail="Unlock command rejected by device")
     except HTTPException:
         raise
@@ -461,7 +462,7 @@ async def talk(request: Request, auth=Depends(verify_api_key)):
             CHANNEL, TALK_MAX_SECONDS,
         )
         return {"success": True, "frames": frames,
-                "seconds": round(frames * 640 / 16000, 2)}
+                "seconds": round(frames * 640 / 16000, 2), "by": auth}
     except DahuaError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
