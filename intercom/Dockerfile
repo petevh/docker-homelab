@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 # mediamtx — lightweight RTSP server for the H264 passthrough feed
@@ -19,6 +19,14 @@ RUN ARCH="$(dpkg --print-architecture)" \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Piper TTS voice model for the /say endpoint (en_US, natural neural voice).
+ARG PIPER_VOICE=en_US-amy-medium
+RUN mkdir -p /app/piper \
+    && curl -fsSL "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/${PIPER_VOICE}.onnx" \
+       -o "/app/piper/${PIPER_VOICE}.onnx" \
+    && curl -fsSL "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/${PIPER_VOICE}.onnx.json" \
+       -o "/app/piper/${PIPER_VOICE}.onnx.json"
 
 COPY mediamtx.yml /app/mediamtx.yml
 COPY entrypoint.sh /app/entrypoint.sh

@@ -6,6 +6,7 @@ Reverse-engineered from DMSS APK + live PCAP. See DahuaConsole/NEXT_STEPS.md
 for full research notes.
 """
 
+import audioop          # G.711 a-law encode (verified vs captured frames)
 import hashlib
 import hmac as _hmac
 import base64
@@ -941,12 +942,18 @@ def subscribe_events(
 #      an encrypt=0 session silently MUTES the uplink audio).
 #   2. 6-PLAY handshake on the encrypt=2 visualtalk relay (one socket).
 #   3. Push PCMA(G711a) @16000Hz, framed as: DHAV 0xf0 wrapper -> RTP (pt=8,
-#      MARKER bit set) -> 0x24 interleave on channel 10. Pace at ~40ms/frame
-#      (640 samples). Drain the socket while sending (TCP backpressure else).
+#      MARKER bit set) -> 0x24 interleave on channel 10. Pace at 40.25ms/frame
+#      (644 samples). Drain the socket while sending (TCP backpressure else).
 # The audio PAYLOAD is plaintext PCMA; encrypt=2 is only the session mode.
+#
+# FRAME SIZE = 644 samples, NOT 640. The device expects the exact 692-byte 0xf0
+# DHAV frame DMSS sends (40 hdr + 644 alaw + 8 trailer). A 640-sample frame is
+# 688 bytes — 4 bytes short of the byte-for-byte-verified capture, and the door
+# accepts it but plays NOTHING. This matches DahuaConsole/talkback_replay.py,
+# the only audibly-verified reference. Do not "round to 640" — verified at door.
 
 TALK_AUDIO_RATE   = 16000      # PCMA sample rate (the SDP's PCMA/16000 was right)
-TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz (capture used 644-sample frames)
+TALK_FRAME_SAMPLES = 644       # 40.25ms/frame @16kHz — matches verified 692B capture
 TALK_CHANNEL      = 10         # interleave channel of the uplink
 TALK_PTYPE        = 8          # RTP payload type: PCMA
 TALK_HANDSHAKE = [             # exact 6-PLAY sequence DMSS sends, one socket
@@ -981,20 +988,29 @@ def _linear_to_alaw(sample: int) -> int:
 
 
 def _dhav_audio_frame(alaw: bytes, idx: int, ts_base: int) -> bytes:
-    """Wrap PCMA bytes in a Dahua DHAV 0xf0 audio frame (matches DMSS byte-for-byte
-    on the dynamic fields; cosmetic counters need only be monotonic)."""
+    """Wrap PCMA bytes in a Dahua DHAV 0xf0 audio frame.
+
+    hdr[23] is a HEADER CHECKSUM = sum(hdr[0:23]) & 0xFF, which the device
+    validates — a wrong value there makes the device silently drop the frame
+    (this was the silent-/talk bug: it was previously written as a guessed
+    counter `0x17 + idx*0x15`). Verified against captured DMSS frames: every
+    real frame's byte[23] equals sum of its first 23 header bytes."""
     total = 40 + len(alaw) + 8
     hdr = bytearray(40)
     hdr[0:4] = b"DHAV"
     hdr[4]   = 0xf0
     struct.pack_into("<I", hdr, 8, idx & 0xFFFFFFFF)         # frame seq
     struct.pack_into("<I", hdr, 12, total)                   # total len
-    struct.pack_into("<I", hdr, 16, ts_base & 0xFFFFFFFF)    # fixed session ts
-    struct.pack_into("<H", hdr, 20, (90 + idx * 20) & 0xFFFF)  # +20/frame
-    hdr[22] = 0x14
-    hdr[23] = (0x17 + idx * 0x15) & 0xFF                     # +0x15/frame
-    hdr[24:32] = bytes((0x83, 0x01, 0x0e, 0x04, 0x95, 0x00, 0x00, 0x00))
+    # ts32 must be a REAL, plausible, monotonic epoch-ish timestamp advancing
+    # ~1/sec (real frames: 1771730525++). A garbage placeholder (0x12345678 = a
+    # 1979 time) makes the device discard frames → silence. ts16 = 100 + idx*20.
+    ts16 = (100 + idx * 20)
+    struct.pack_into("<I", hdr, 16, (ts_base + ts16 // 1000) & 0xFFFFFFFF)  # session ts (sec)
+    struct.pack_into("<H", hdr, 20, ts16 & 0xFFFF)          # +20/frame (ms-ish)
+    hdr[22] = 0x14                                           # extension length
+    hdr[24:32] = bytes((0x83, 0x01, 0x0e, 0x04, 0x95, 0x00, 0x00, 0x00))  # 0x0e=PCM_ALAW
     hdr[32:40] = bytes((0x00, 0x01, 0x00, 0x00, 0xb3, 0x08, 0xfb, 0xa6))  # const sub-hdr
+    hdr[23] = sum(hdr[0:23]) & 0xFF                          # header checksum
     return bytes(hdr) + alaw + b"dhav" + struct.pack("<I", total)
 
 
@@ -1046,13 +1062,18 @@ class TalkbackSession:
         return host, int(port), path, tok
 
     def start(self):
-        # 1) hold an encrypt=2 video session so the door is a live media session
+        # ONE play token + ONE relay URL for BOTH the video-hold and the talk
+        # handshake — mirrors the verified talkback_replay.py. Using a second
+        # token/relay for the talk (the old code did) opens a session the door
+        # doesn't treat as talk-ready → frames accepted but NO audio.
         bearer = self.creds.ensure()
         tok = get_play_token(bearer, self.pcs_username)
-        hold_url = get_relay_url(tok, bearer, self.pcs_username, self.device_sn,
-                                 channel=self.channel, stream=0, encrypt=True)
-        hp, hpath = hold_url.split("/", 1)
+        relay_url = get_relay_url(tok, bearer, self.pcs_username, self.device_sn,
+                                  channel=self.channel, stream=0, encrypt=True)
+        hp, hpath = relay_url.split("/", 1)
         hhost, hport = hp.rsplit(":", 1)
+
+        # 1) hold the video session so the door is a live media session
         self._hold_sock = socket.create_connection((hhost, int(hport)), timeout=15)
         self._hold_sock.sendall(
             (f"PLAY /{hpath}{'&' if '?' in hpath else '?'}trackID=31&method=0 "
@@ -1061,8 +1082,8 @@ class TalkbackSession:
         threading.Thread(target=self._drain, args=(self._hold_sock,), daemon=True).start()
         time.sleep(3)   # let the media session come up
 
-        # 2) talk relay (its own encrypt=2 session) + 6-PLAY handshake
-        thost, tport, tpath, _ = self._open_relay(encrypt=True)
+        # 2) talk on the SAME relay URL (new socket) + 6-PLAY handshake
+        thost, tport, tpath = hhost, int(hport), hpath
         self._sock = socket.create_connection((thost, int(tport)), timeout=15)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sep = "&" if "?" in tpath else "?"
@@ -1097,7 +1118,10 @@ class TalkbackSession:
 
     # -- audio feed ---------------------------------------------------------
     def _send_frame(self, samps: list[int]):
-        alaw = bytes(_linear_to_alaw(s) for s in samps)
+        # Correct G.711 a-law via audioop (verified byte-for-byte vs captured
+        # DMSS frames; the old hand-rolled _linear_to_alaw was wrong → silence).
+        pcm = struct.pack("<%dh" % len(samps), *samps)
+        alaw = audioop.lin2alaw(pcm, 2)
         dhav = _dhav_audio_frame(alaw, self._idx, self._ts_base)
         rtp = struct.pack("!BBHII", 0x80, 0x80 | (TALK_PTYPE & 0x7f),
                           self._rtp_seq & 0xFFFF, self._rtp_ts & 0xFFFFFFFF,

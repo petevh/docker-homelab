@@ -110,6 +110,9 @@ RTSP_PUBLISH_URL = os.environ.get("DAHUA_RTSP_PUBLISH_URL",
 # (e.g. http://192.168.20.50:8123/api/webhook/front_door). Fire-and-forget,
 # in addition to the /events SSE stream.
 HA_WEBHOOK_URL   = os.environ.get("HA_WEBHOOK_URL", "")
+# Piper TTS voice for /say (path to the .onnx model baked into the image).
+PIPER_VOICE      = os.environ.get("PIPER_VOICE", "en_US-amy-medium")
+PIPER_MODEL      = os.environ.get("PIPER_MODEL", f"/app/piper/{PIPER_VOICE}.onnx")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dahua_api")
@@ -490,6 +493,76 @@ async def talk(request: Request, auth=Depends(verify_api_key)):
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         log.error("Talk error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _talk_lock.release()
+
+
+def _tts_to_wav(text: str) -> bytes:
+    """Synthesize text → 16-bit mono WAV bytes via piper. Blocking (run off-loop)."""
+    voice = _get_piper_voice()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        voice.synthesize_wav(text, wf)    # piper writes a complete RIFF/WAV
+    return buf.getvalue()
+
+
+_piper_voice = None
+_piper_lock = threading.Lock()
+
+
+def _get_piper_voice():
+    """Load (once) and cache the piper voice model."""
+    global _piper_voice
+    if _piper_voice is None:
+        with _piper_lock:
+            if _piper_voice is None:
+                from piper import PiperVoice
+                _piper_voice = PiperVoice.load(PIPER_MODEL,
+                                               config_path=f"{PIPER_MODEL}.json")
+    return _piper_voice
+
+
+@app.post("/say")
+@app.get("/say")
+async def say(request: Request, text: str = "", auth=Depends(verify_api_key)):
+    """Speak `text` out the door speaker via piper TTS.
+
+    Pass text as ?text=... (GET) or JSON/body {"text": "..."} (POST). Synthesizes
+    to WAV then plays via the same relay as /talk. One talk session at a time.
+    Callable from HA rest_command — HA passes plain text, no audio handling.
+    """
+    if not _talk_ready():
+        raise HTTPException(status_code=503, detail="Talkback not configured")
+    # text may arrive as query param, JSON body, or raw body
+    msg = text or request.query_params.get("text", "")
+    if not msg:
+        try:
+            j = await request.json()
+            msg = (j or {}).get("text", "")
+        except Exception:
+            body = await request.body()
+            msg = body.decode("utf-8", "ignore").strip()
+    msg = (msg or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="No text — pass ?text=... or {\"text\":\"...\"}")
+
+    log.info("Say by '%s' — %r", auth, msg[:120])
+    if not _talk_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A talk session is already active")
+    try:
+        wav = await asyncio.to_thread(_tts_to_wav, msg)
+        pcm, rate = _pcm_from_upload(wav, "audio/wav")
+        frames = await asyncio.to_thread(
+            play_audio_clip, _creds, DEVICE_SN, PCS_USERNAME, pcm, rate,
+            CHANNEL, TALK_MAX_SECONDS,
+        )
+        return {"success": True, "text": msg, "frames": frames,
+                "seconds": round(frames * 640 / 16000, 2), "by": auth}
+    except DahuaError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        log.error("Say error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         _talk_lock.release()

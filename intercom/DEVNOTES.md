@@ -12,16 +12,18 @@ analysis is in `DahuaConsole/NEXT_STEPS.md` — read it before touching this ser
 | `/frame` | **Working** | Clean full-frame JPEG (RTP de-interleave fix, 2026-06-12) |
 | `/stream` | **Working** | Clean MJPEG |
 | `/events` | **Working** | SSE stream fires on doorbell ring via direct DHIP to VTH |
-| `/talk` | **Working** | POST a WAV/PCM clip → plays out the door speaker (TTS/announce) |
-| `/talk/ws` | **Working** | WebSocket push-to-talk: stream 16-bit PCM frames live |
+| `/talk` | **Implemented** | POST a WAV/PCM clip → door speaker. NOTE: "Working" was overstated — talkback frame size was wrong (640 vs verified 644), fixed 2026-06-14; re-verify audibly at the door |
+| `/talk/ws` | **Implemented** | WebSocket push-to-talk: stream 16-bit PCM frames live (same 644 fix applies) |
+| `/say` | **Implemented** | piper TTS → door speaker; text in, no audio handling. Pending audible door verification |
 | HA generic_camera | Ready to wire | Stream quality fixed |
 | HA webhook trigger | Ready to wire | Consume `/events` SSE |
 | HA two-way audio | Ready to wire | go2rtc + Advanced Camera Card mic button → `/talk/ws` (see below) |
 
-## Talkback — How It Works (verified at the door 2026-06-13)
+## Talkback — How It Works (partially working — see STATUS below)
 
 Push audio UP to the door speaker over the same cloud relay we use for video.
-Fully reverse-engineered from a clean OPNsense capture of a real DMSS talk session.
+Reverse-engineered from a clean OPNsense capture of a real DMSS talk session.
+Verbatim replay works; encoding our own audio does NOT yet (see ⚠️ STATUS).
 
 1. **Hold an `encrypt=2` video session** (`/real/1/1/encrypt/RTSV1`). Precondition:
    an idle door 503s the talk PLAY, AND an `encrypt=0` session silently **mutes**
@@ -30,17 +32,55 @@ Fully reverse-engineered from a clean OPNsense capture of a real DMSS talk sessi
 2. **6-PLAY handshake** on the `encrypt=2` visualtalk relay, one socket:
    `trackID=31&method=0`, `talktype=talk&trackID=64&method=0`, `trackID=6&method=1`,
    `method=2`, `trackID=31&method=1`, `trackID=70&method=3`. Audio flows after the 6th.
-3. **Push audio**: PCMA (G.711 a-law) at **16000 Hz** (the SDP's `PCMA/16000` is
-   correct — earlier 8 kHz guess played it half-speed/broken), framed as:
-   `DHAV 0xf0` wrapper → 12-byte RTP (pt=8, **marker bit set / 0x88**) → `0x24`
-   interleave on **channel 10**. ~40 ms / 640-sample frames, paced realtime against
-   an absolute clock. **Drain the talk socket while sending** or TCP backpressure
-   stalls cause breakup.
+3. **Push audio**: framed as `DHAV 0xf0` wrapper → 12-byte RTP (pt=8, **marker bit
+   set / 0x88**) → `0x24` interleave on **channel 10**, ~40 ms frames, paced
+   realtime against an absolute clock. **Drain the talk socket while sending** or
+   TCP backpressure stalls cause breakup.
 
 Code: `TalkbackSession` + `play_audio_clip()` in `dahua_client.py`. Only one talk
 session at a time (single device talk channel). `DAHUA_TALK_MAX_SECONDS` (default
 180) is a hard backstop against a stuck-open mic; push-to-talk also stops on the
 WS closing.
+
+### ⚠️ STATUS (2026-06-14): only VERBATIM REPLAY is audibly verified. Sending our OWN audio (`/talk`, `/say`) is NOT working — root cause unsolved.
+
+What is CONFIRMED working (heard clearly at the door):
+- **`DahuaConsole/talkback_replay.py <capture>`** — replays the captured DMSS
+  talk frames **verbatim** (raw bytes, no decode/re-encode) and the door plays
+  them clearly. This is the ONLY proven-audible path. Transport, handshake
+  (6-PLAY), encrypt=2 video-hold, single-token session, relay — all proven good.
+- Use capture **`522539f6-...vlan04.pcap`** (the real recorded test message,
+  374 voice frames ~15s). NOT `2115d068-...` — that one is near-silent (only
+  faint birdsong); testing with it wasted hours ("no audio" = nothing to play).
+
+What is NOT working: **`/talk` (POST a WAV) and `/say` (piper TTS) produce no
+audio**, even standalone via `play_audio_clip` (no API/container/RTSP-stream
+contention). i.e. any path that builds frames from our OWN audio is silent,
+while verbatim replay of captured frames is audible.
+
+The unsolved problem — **the 0xf0 frame audio payload layout is not understood.**
+Each captured voice frame is 692 bytes:
+  `[0:40]`  DHAV header (magic, 0xf0 type, [8:12]seq, [12:16]len=692,
+            [16:20]ts32 real-epoch +1/~sec, [20:22]ts16 +20/frame from 100,
+            [22]=0x14 extlen, [23]=checksum sum(hdr[0:23])&0xff,
+            [24:32]=0x83 ext w/ codec byte 0x0e (=PCM_ALAW per ffmpeg dhav.c),
+            [32:40]=const sub-hdr)
+  `[40:684]` 644-byte body
+  `[684:692]` "dhav"+len trailer
+BUT decoding `[40:684]` as a-law = NOISE (not the message). ffmpeg's DHAV demuxer
+parses the stream as `pcm_alaw 16000Hz 15.0s` but its output is ALSO distorted
+noise. Tried payload offsets 40, 44 (after a constant 4-byte `a4009922` sub-hdr),
+300; codecs a-law/μ-law/ADPCM/raw-s16 — NONE decode to clean speech by ear.
+`[40:44]` = constant `a4009922` across all frames (a per-frame audio sub-header).
+So the real codec / payload offset for the 0xf0 audio body is STILL UNKNOWN.
+
+Implication: we can replay captured audio, but cannot yet synthesize/encode our
+own audio (TTS) into the device's format. **NEXT STEP: read FFmpeg
+`libavformat/dhav.c` to get the authoritative 0xf0 audio-frame payload layout
+(real sub-header size, payload offset, codec), then reverse it for encoding.**
+The 4 dahua_client.py fixes this session (audioop a-law encoder, header checksum,
+ts16/ts32, single-token session) are correct improvements and kept — but none
+made `/talk` audible because the payload-layout problem is upstream of them.
 
 ### HA two-way audio wiring (later — no go2rtc yet)
 Standard path once go2rtc is added: publish the existing RTSP `frontdoor` feed to
