@@ -12,4 +12,4 @@ http:
     homeassistant:
       loadBalancer:
         servers:
-          - url: "http://192.168.40.51:8123"
+          - url: "http://192.168.20.50:8123"

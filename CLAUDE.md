@@ -59,7 +59,7 @@ Docker network: traefik (internal bridge)
     └── paperless    (paperless.app.vanheerden.ch) [planned]
 
 File provider (non-Docker upstreams via config/dynamic/)
-    ├── ha           (ha.app.vanheerden.ch → 192.168.40.51:8123)
+    ├── ha           (ha.app.vanheerden.ch → 192.168.20.50:8123)
     └── omada        (omada.app.vanheerden.ch → 192.168.99.50:8043)
 ```
 
@@ -115,7 +115,7 @@ labels:
 ### Home Assistant
 - **Role:** Home automation
 - **URL:** `ha.app.vanheerden.ch`
-- **Upstream:** `http://192.168.40.51:8123` (haOS VM, separate VLAN)
+- **Upstream:** `http://192.168.20.50:8123` (haOS VM on server VLAN, same as docker-vm)
 - **Config:** `traefik/config/dynamic/homeassistant.yml` (file provider)
 - **Note:** Requires `http.use_x_forwarded_for: true` and `trusted_proxies: 192.168.20.203` in HA's `configuration.yaml`
 

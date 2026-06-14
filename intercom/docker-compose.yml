@@ -30,6 +30,8 @@ services:
       - DAHUA_STREAM=${DAHUA_STREAM:-0}
       - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-0}
       - DAHUA_STREAM_QUALITY=${DAHUA_STREAM_QUALITY:-5}
+      # Optional: push doorbell rings straight to a Home Assistant webhook
+      - HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-}
       # Direct VTH connection (doorbell event subscription)
       - DAHUA_VTH_HOST=${DAHUA_VTH_HOST}
       - DAHUA_VTH_PORT=${DAHUA_VTH_PORT:-5000}

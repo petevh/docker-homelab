@@ -36,6 +36,8 @@ import io
 import re
 import wave
 
+import requests
+
 from fastapi import (
     FastAPI, HTTPException, Depends, Security, Request, WebSocket,
     WebSocketDisconnect,
@@ -104,6 +106,10 @@ STREAM_WIDTH     = int(os.environ.get("DAHUA_STREAM_WIDTH", "0"))   # 0 = native
 STREAM_QUALITY   = int(os.environ.get("DAHUA_STREAM_QUALITY", "5"))
 RTSP_PUBLISH_URL = os.environ.get("DAHUA_RTSP_PUBLISH_URL",
                                   "rtsp://127.0.0.1:8554/frontdoor")
+# Optional: push doorbell rings straight to a Home Assistant webhook
+# (e.g. http://192.168.20.50:8123/api/webhook/front_door). Fire-and-forget,
+# in addition to the /events SSE stream.
+HA_WEBHOOK_URL   = os.environ.get("HA_WEBHOOK_URL", "")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dahua_api")
@@ -141,6 +147,17 @@ def _new_talk_session() -> TalkbackSession:
     )
 
 
+def _post_ha_webhook(call_id: str, local_time: str) -> None:
+    try:
+        requests.post(
+            HA_WEBHOOK_URL,
+            json={"event": "doorbell_ring", "call_id": call_id, "local_time": local_time},
+            timeout=3,
+        )
+    except Exception as e:
+        log.warning("HA webhook POST failed: %s", e)
+
+
 def _on_ring(call_id: str, local_time: str) -> None:
     payload = f'data: {{"event":"doorbell_ring","call_id":"{call_id}","local_time":"{local_time}"}}\n\n'
     with _ring_listeners_lock:
@@ -149,6 +166,12 @@ def _on_ring(call_id: str, local_time: str) -> None:
                 q.put_nowait(payload)
             except Exception:
                 pass
+    # Push straight to Home Assistant (fire-and-forget on its own thread so a
+    # slow/unreachable HA can't stall detection of the next ring).
+    if HA_WEBHOOK_URL:
+        threading.Thread(
+            target=_post_ha_webhook, args=(call_id, local_time), daemon=True
+        ).start()
 
 
 def _start_event_monitor() -> None:
