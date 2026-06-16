@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Front Door</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:#111; color:#eee; font-family:-apple-system,system-ui,sans-serif;
+         display:flex; flex-direction:column; height:100dvh; }
+  header { padding:10px 14px; font-size:18px; font-weight:600; background:#1b1b1b; }
+  #video { flex:1; min-height:0; background:#000; object-fit:contain; width:100%; }
+  #status { padding:6px 14px; font-size:13px; color:#9aa; min-height:22px; }
+  .controls { display:flex; gap:10px; padding:14px; padding-bottom:max(14px,env(safe-area-inset-bottom)); background:#1b1b1b; }
+  button { flex:1; border:0; border-radius:14px; padding:18px 8px; font-size:16px; font-weight:600;
+           color:#fff; background:#333; transition:background .1s; touch-action:manipulation; }
+  button:active { filter:brightness(1.3); }
+  #talk.on { background:#2e7d32; }
+  #talk { background:#37474f; }
+  #unlock { background:#1565c0; }
+  #mute { background:#37474f; }
+  #mute.muted { background:#b71c1c; }
+  .icon { font-size:22px; display:block; margin-bottom:4px; }
+</style>
+</head>
+<body>
+<header>🔔 Front Door</header>
+<video id="video" autoplay playsinline></video>
+<div id="status">connecting…</div>
+<div class="controls">
+  <button id="mute"><span class="icon">🔊</span>Mute</button>
+  <button id="talk"><span class="icon">🎙️</span>Talk</button>
+  <button id="unlock"><span class="icon">🔓</span>Unlock</button>
+</div>
+<script>
+const KEY = new URLSearchParams(location.search).get('key') || '';
+const $ = id => document.getElementById(id);
+let _log=[];
+const status = m => { _log.push(m); $('status').textContent = _log.slice(-4).join(' | '); console.log('[talk]',m); };
+window.onerror = (msg,src,ln) => status('JSERR: '+msg+' @'+ln);
+status('page loaded, key='+(KEY?('set('+KEY.length+')'):'MISSING'));
+
+// ---- Downlink: HLS video+audio (the door's picture AND incoming audio) ----
+const vid = $('video');
+const hlsUrl = `/hls/frontdoor/index.m3u8`;
+vid.onplaying = () => status('VIDEO PLAYING');
+vid.onstalled = () => status('video stalled');
+vid.onerror = () => status('video el error: '+(vid.error&&vid.error.code));
+function useHlsJs(){
+  const s = document.createElement('script');
+  s.src = '/hls.min.js';
+  s.onload = () => {
+    status('hls.js loaded, supported='+(window.Hls&&Hls.isSupported()));
+    if (window.Hls && Hls.isSupported()) {
+      const hls = new Hls({liveSyncDurationCount:3});
+      hls.loadSource(hlsUrl); hls.attachMedia(vid);
+      hls.on(Hls.Events.MANIFEST_PARSED, ()=>{ status('manifest ok'); vid.play().then(()=>status('play ok')).catch(e=>status('tap video to start ('+e.name+')')); });
+      hls.on(Hls.Events.ERROR, (e,d)=>{ status('hls '+(d.fatal?'FATAL ':'')+d.type+'/'+d.details); });
+    } else if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+      // fallback to native only if hls.js unsupported
+      vid.src = hlsUrl; vid.play().catch(e=>status('native blocked: '+e.name));
+    } else { status('no HLS support'); }
+  };
+  s.onerror = () => status('FAILED to load /hls.min.js');
+  document.head.appendChild(s);
+}
+// tap-to-start fallback for autoplay policies
+vid.addEventListener('click', ()=>vid.play().catch(()=>{}));
+useHlsJs();
+
+// ---- Unlock ----
+$('unlock').onclick = async () => {
+  status('unlocking…');
+  try {
+    const r = await fetch(`/unlock`, {method:'POST', headers:{'X-API-Key':KEY}});
+    status(r.ok ? 'unlocked ✓' : 'unlock failed');
+  } catch(e){ status('unlock error'); }
+};
+
+// ---- Mute (incoming door audio = the HLS <video> element) ----
+let muted=false;
+$('mute').onclick = () => {
+  muted=!muted; vid.muted=muted;
+  $('mute').classList.toggle('muted',muted);
+  $('mute').querySelector('.icon').textContent = muted?'🔇':'🔊';
+};
+
+// ---- Uplink: mic -> 16k PCM -> WebSocket /talk/ws ----
+let ws=null, audioCtx=null, micStream=null, node=null, talking=false;
+const TARGET_RATE=16000;
+
+async function startTalk(){
+  if(talking) return;
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+  }catch(e){ status('mic denied'); return; }
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const proto = location.protocol==='https:'?'wss':'ws';
+  ws = new WebSocket(`${proto}://${location.host}/talk/ws?key=${encodeURIComponent(KEY)}&rate=${TARGET_RATE}`);
+  ws.binaryType='arraybuffer';
+  ws.onopen = () => { status('talking…'); };
+  ws.onclose = e => { status(talking?('talk closed ('+e.code+')'):'live'); stopTalk(true); };
+  ws.onerror = () => status('talk ws error');
+  ws.onmessage = ev => { /* {event:talk_started} etc */ };
+
+  const src = audioCtx.createMediaStreamSource(micStream);
+  // ScriptProcessor (broad support); resample ctx.sampleRate -> 16k, float->int16
+  node = audioCtx.createScriptProcessor(4096,1,1);
+  let resampleBuf=[];
+  const ratio = audioCtx.sampleRate / TARGET_RATE;
+  node.onaudioprocess = e => {
+    if(!ws || ws.readyState!==1) return;
+    const inp = e.inputBuffer.getChannelData(0);
+    // simple linear resample to 16k
+    const outLen = Math.floor(inp.length/ratio);
+    const out = new Int16Array(outLen);
+    for(let i=0;i<outLen;i++){
+      const s = inp[Math.floor(i*ratio)];
+      out[i] = Math.max(-32768, Math.min(32767, s*32767));
+    }
+    ws.send(out.buffer);
+  };
+  src.connect(node); node.connect(audioCtx.destination);
+  talking=true; $('talk').classList.add('on');
+}
+function stopTalk(fromClose){
+  talking=false; $('talk').classList.remove('on');
+  try{ if(ws && !fromClose && ws.readyState===1){ ws.send(JSON.stringify({cmd:'stop'})); ws.close(); } }catch(e){}
+  try{ node && node.disconnect(); }catch(e){}
+  try{ micStream && micStream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  try{ audioCtx && audioCtx.close(); }catch(e){}
+  ws=null; node=null; micStream=null; audioCtx=null;
+  if(!fromClose) status('live');
+}
+// toggle talk (tap to start, tap to stop — duplex stays open while on)
+$('talk').onclick = () => { talking ? stopTalk(false) : startTalk(); };
+</script>
+</body>
+</html>

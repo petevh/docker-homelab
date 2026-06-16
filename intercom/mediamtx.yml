@@ -8,8 +8,13 @@ rtsp: yes
 rtspAddress: :8554
 protocols: [tcp]
 
-# Other protocols off — HA's stream component handles HLS/WebRTC from the RTSP source.
-hls: no
+# HLS on for the /talk-ui duplex page (browser plays video+audio together).
+# Standard (mpegts) HLS — broadest browser/hls.js compatibility (LL-HLS fMP4
+# was rejected by iOS Safari native player). Slightly higher latency, reliable.
+hls: yes
+hlsAddress: :8888
+hlsVariant: mpegts
+hlsAlwaysRemux: yes
 webrtc: no
 rtmp: no
 srt: no

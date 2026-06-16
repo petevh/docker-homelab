@@ -41,18 +41,30 @@ services:
       - DAHUA_VTH_PASSWORD=${DAHUA_VTH_PASSWORD}
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.intercom.rule=Host(`intercom.app.vanheerden.ch`)"
-      - "traefik.http.routers.intercom.entrypoints=websecure"
-      - "traefik.http.routers.intercom.tls=true"
-      - "traefik.http.routers.intercom.tls.certresolver=cloudflare"
       - "traefik.http.services.intercom.loadbalancer.server.port=8000"
-      # Rate limiting — max 10 requests/minute to prevent brute force
+      # Middleware defs
+      # Rate limiting — protects /unlock etc. from brute force
       - "traefik.http.middlewares.dahua-ratelimit.ratelimit.average=10"
       - "traefik.http.middlewares.dahua-ratelimit.ratelimit.burst=5"
       - "traefik.http.middlewares.dahua-ratelimit.ratelimit.period=1m"
       # Tailscale IP allowlist — only Tailscale CGNAT range + home LAN
       - "traefik.http.middlewares.dahua-ipallowlist.ipallowlist.sourcerange=100.64.0.0/10,192.168.0.0/16"
-      # Apply middlewares
+
+      # Streaming router (HLS/MJPEG/talk page+ws): IP-allowlist ONLY, NO rate-limit
+      # — HLS pulls many segments/min and would trip the limiter. Higher priority.
+      - "traefik.http.routers.intercom-stream.rule=Host(`intercom.app.vanheerden.ch`) && (PathPrefix(`/hls`) || PathPrefix(`/stream`) || PathPrefix(`/talk`) || Path(`/talk-ui`) || Path(`/hls.min.js`) || Path(`/frame`))"
+      - "traefik.http.routers.intercom-stream.priority=100"
+      - "traefik.http.routers.intercom-stream.entrypoints=websecure"
+      - "traefik.http.routers.intercom-stream.tls=true"
+      - "traefik.http.routers.intercom-stream.tls.certresolver=cloudflare"
+      - "traefik.http.routers.intercom-stream.middlewares=dahua-ipallowlist"
+
+      # Main router (everything else incl. /unlock): rate-limit + IP-allowlist
+      - "traefik.http.routers.intercom.rule=Host(`intercom.app.vanheerden.ch`)"
+      - "traefik.http.routers.intercom.priority=1"
+      - "traefik.http.routers.intercom.entrypoints=websecure"
+      - "traefik.http.routers.intercom.tls=true"
+      - "traefik.http.routers.intercom.tls.certresolver=cloudflare"
       - "traefik.http.routers.intercom.middlewares=dahua-ratelimit,dahua-ipallowlist"
 
 networks:

@@ -33,6 +33,8 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 COPY main.py .
 COPY dahua_client.py .
+COPY talk_ui.html .
+COPY hls.min.js .
 
 EXPOSE 8000 8554
 

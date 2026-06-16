@@ -43,7 +43,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.security.api_key import APIKeyHeader
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 
 from dahua_client import (
@@ -321,6 +321,45 @@ def health():
         talk_configured=_talk_ready(),
         talk_active=_talk_lock.locked(),
     )
+
+
+@app.get("/hls/{path:path}")
+def hls_proxy(path: str):
+    """Proxy mediamtx HLS (localhost:8888) so the talk-ui page fetches it
+    same-origin (no CORS, no extra exposed port, works through Traefik).
+    Carries the door's video+audio for the duplex page's downlink.
+    No API key on HLS itself (it's only the camera feed, and is already gated
+    by Traefik's IP-allowlist + Tailscale); this keeps relative playlist/segment
+    URLs clean so the browser's HLS player resolves them correctly."""
+    try:
+        r = requests.get(f"http://127.0.0.1:8888/{path}", timeout=10)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"HLS upstream: {e}")
+    ct = r.headers.get("Content-Type", "application/octet-stream")
+    return Response(content=r.content, media_type=ct,
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/hls.min.js")
+def hls_js():
+    """Vendored hls.js so the talk page has no external CDN dependency."""
+    try:
+        with open("/app/hls.min.js", "rb") as f:
+            return Response(content=f.read(), media_type="application/javascript")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="hls.min.js not found")
+
+
+@app.get("/talk-ui", response_class=HTMLResponse)
+def talk_ui():
+    """Duplex talk web page: live camera + mic (push to /talk/ws) + unlock.
+    Open on a phone (mic needs the page; HA dashboards can't capture mic).
+    Pass ?key=<api-key>. HA 'Talk' button links here."""
+    try:
+        with open("/app/talk_ui.html", "r") as f:
+            return HTMLResponse(f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="talk_ui.html not found")
 
 
 @app.post("/unlock", response_model=UnlockResponse)
