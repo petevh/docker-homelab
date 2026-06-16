@@ -7,6 +7,7 @@ for full research notes.
 """
 
 import audioop          # G.711 a-law encode (verified vs captured frames)
+import os
 import hashlib
 import hmac as _hmac
 import base64
@@ -956,7 +957,9 @@ def subscribe_events(
 #  produced choppy noise because the device decrypted our plaintext as ciphertext.)
 
 from Crypto.Cipher import AES as _AES
-TALK_AES_KEY = bytes.fromhex("4d444d324e54466c5a6a4e694d546778")  # ASCII "MDM2NTFlZjNiMTgx"
+# AES-128-ECB talk key, hex, from env DAHUA_TALK_AES_KEY (gitignored .env). No
+# hardcoded key in source. Talk endpoints fail clearly if unset.
+TALK_AES_KEY = bytes.fromhex(os.environ.get("DAHUA_TALK_AES_KEY", ""))
 
 TALK_AUDIO_RATE   = 16000      # PCMA sample rate (the SDP's PCMA/16000 was right)
 TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz; 640B a-law payload (AES-encrypted)
@@ -1001,11 +1004,14 @@ _DHAV_EXT = bytes.fromhex("83010e049500000000010000b308fba6a4009922")
 def _dhav_audio_frame(alaw: bytes, idx: int, ts_base: int) -> bytes:
     """Build a Dahua DHAV 0xf0 talk frame from 640 bytes of a-law.
 
-    Layout (692B for 640B payload): 24B header + 20B extension + AES-128-ECB(alaw)
-    + 8B 'dhav' trailer. The 640-byte a-law payload is AES-128-ECB ENCRYPTED with
-    TALK_AES_KEY (encrypt=2 session). hdr[23] is a checksum = sum(hdr[0:23])&0xFF.
-    Verified: re-encrypting decrypted captured audio reproduces captured frames."""
-    enc = _AES.new(TALK_AES_KEY, _AES.MODE_ECB).encrypt(alaw)
+    Layout (692B for 640B payload): 24B header + 20B extension + payload + 8B
+    'dhav' trailer. The 640-byte a-law payload is a HYBRID: the FIRST 256 bytes
+    are AES-128-ECB encrypted with TALK_AES_KEY; the remaining 384 bytes are PLAIN
+    a-law. (Encrypting all 640 produced distorted audio — only the first 256 are
+    encrypted; verified: hybrid re-encode reproduces captured frames byte-for-byte,
+    decode confirmed clean+correct-speed at the door 2026-06-16.)
+    hdr[23] is a checksum = sum(hdr[0:23])&0xFF."""
+    enc = _AES.new(TALK_AES_KEY, _AES.MODE_ECB).encrypt(alaw[:256]) + alaw[256:]
     total = 24 + 20 + len(enc) + 8
     hdr = bytearray(24)
     hdr[0:4] = b"DHAV"
