@@ -409,6 +409,10 @@ def frame(auth=Depends(verify_api_key)):
     """Latest JPEG snapshot from VTO camera. Use as HA still_image_url."""
     if not _stream_proxy:
         raise HTTPException(status_code=503, detail="Stream proxy not configured")
+    # On-demand: a snapshot request wakes the relay (and resets the idle grace),
+    # same as an HLS fetch. Without this the relay only runs while /stream or /talk
+    # holds a viewer, so HA still_image_url / notification thumbnails 503 when idle.
+    _stream_proxy.touch()
     jpeg = _stream_proxy.get_frame()
     if not jpeg:
         raise HTTPException(status_code=503, detail="No frame available yet — stream starting up")
