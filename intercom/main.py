@@ -331,6 +331,17 @@ def hls_proxy(path: str):
     No API key on HLS itself (it's only the camera feed, and is already gated
     by Traefik's IP-allowlist + Tailscale); this keeps relative playlist/segment
     URLs clean so the browser's HLS player resolves them correctly."""
+    if _stream_proxy:
+        _stream_proxy.touch()   # on-demand: start/keep the relay alive while watched
+        # On a cold start the relay+mediamtx need a moment to produce the playlist.
+        if path.endswith("index.m3u8"):
+            for _ in range(20):
+                try:
+                    if requests.get("http://127.0.0.1:8888/" + path, timeout=2).status_code == 200:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
     try:
         r = requests.get(f"http://127.0.0.1:8888/{path}", timeout=10)
     except Exception as e:
@@ -415,19 +426,23 @@ def stream(auth=Depends(verify_api_key)):
         raise HTTPException(status_code=503, detail="Stream proxy not configured")
 
     def generate():
+        _stream_proxy.acquire_viewer()   # on-demand: start relay while watched
         last_frame = b""
-        while True:
-            jpeg = _stream_proxy.get_frame()
-            if jpeg and jpeg != last_frame:
-                last_frame = jpeg
-                header = (
-                    b"\r\n--dahuaframe\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
-                )
-                yield header + jpeg
-            else:
-                time.sleep(0.05)
+        try:
+            while True:
+                jpeg = _stream_proxy.get_frame()
+                if jpeg and jpeg != last_frame:
+                    last_frame = jpeg
+                    header = (
+                        b"\r\n--dahuaframe\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                    )
+                    yield header + jpeg
+                else:
+                    time.sleep(0.05)
+        finally:
+            _stream_proxy.release_viewer()
 
     return StreamingResponse(
         generate(),

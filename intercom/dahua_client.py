@@ -597,14 +597,64 @@ class StreamProxy:
         self._frame: bytes = b""
         self._running      = False
         self._thread: Optional[threading.Thread] = None
+        # On-demand: relay runs only while there are active viewers. After the
+        # last viewer leaves we keep it alive a short grace period, then stop —
+        # so we don't hold a cloud relay session (and hammer auth) 24/7.
+        self._viewers      = 0
+        self._idle_since: Optional[float] = None
+        self._idle_grace   = 30.0          # seconds to linger after last viewer
+        self._relay_running = False        # is the cloud relay loop active now
 
     def start(self):
+        """Begin the idle-watcher. The relay itself only runs while viewers>0."""
+        if self._thread and self._thread.is_alive():
+            return
         self._running = True
-        self._thread  = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread  = threading.Thread(target=self._supervisor, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._running = False
+
+    def acquire_viewer(self):
+        """Long-lived consumer (e.g. /stream MJPEG, /talk/ws) connects."""
+        with self._lock:
+            self._viewers += 1
+            self._idle_since = None
+        self._ensure_relay()
+
+    def release_viewer(self):
+        with self._lock:
+            self._viewers = max(0, self._viewers - 1)
+            if self._viewers == 0:
+                self._idle_since = time.time()
+
+    def touch(self):
+        """Per-request keep-alive (e.g. each HLS segment/playlist fetch). Starts
+        the relay if down and resets the idle timer; the grace period keeps it up
+        between fetches and stops it ~grace seconds after the player goes away."""
+        with self._lock:
+            self._idle_since = time.time()  # reset grace from now
+        self._ensure_relay()
+
+    def _ensure_relay(self):
+        with self._lock:
+            if self._relay_running:
+                return
+            self._relay_running = True
+        threading.Thread(target=self._run_loop, daemon=True).start()
+
+    def _supervisor(self):
+        """Stop the relay once there are no long-lived viewers AND no recent
+        touch (HLS fetch) within the grace period."""
+        while self._running:
+            time.sleep(5)
+            with self._lock:
+                idle = (self._viewers == 0 and self._idle_since is not None
+                        and time.time() - self._idle_since > self._idle_grace)
+            if idle and self._relay_running:
+                log.info("Stream idle — stopping cloud relay (on-demand)")
+                self._relay_running = False     # _run_loop checks this and exits
 
     def get_frame(self) -> bytes:
         with self._lock:
@@ -634,11 +684,10 @@ class StreamProxy:
         ]
 
     def _run_loop(self):
-        # ONE persistent ffmpeg + RTSP publish for the whole lifetime, so the relay's
-        # 50s reconnect cycle does NOT tear down the RTSP stream (clients stay connected).
-        # The relay socket reconnects underneath and keeps feeding the same ffmpeg stdin;
-        # each new relay session is re-synced to a keyframe before its bytes are written.
-        while self._running:
+        # Runs while there are viewers (_relay_running). ONE persistent ffmpeg +
+        # RTSP publish; the relay socket reconnects underneath (50s cycle) feeding
+        # the same ffmpeg. Exits when the last viewer leaves (on-demand).
+        while self._running and self._relay_running:
             proc = subprocess.Popen(
                 self._ffmpeg_cmd(),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -648,12 +697,21 @@ class StreamProxy:
             reader.start()
             try:
                 # Feed relay sessions into this ffmpeg until it (or we) dies.
-                while self._running and proc.poll() is None:
+                _block_wait = 30
+                while self._running and self._relay_running and proc.poll() is None:
                     try:
                         self._feed_one_relay_session(proc)
+                        _block_wait = 30
                     except Exception as e:
-                        log.warning("Relay session error: %s — reconnecting in 2s", e)
-                        time.sleep(2)
+                        # Cloud "IP in Block List" (code 10005): hammering makes it
+                        # worse. Back off hard (30s→up to 10min) so the block clears.
+                        if "Block List" in str(e) or "10005" in str(e):
+                            log.warning("Relay: IP blocked by cloud — backing off %ds", _block_wait)
+                            time.sleep(_block_wait)
+                            _block_wait = min(_block_wait * 2, 600)
+                        else:
+                            log.warning("Relay session error: %s — reconnecting in 2s", e)
+                            time.sleep(2)
             finally:
                 try:
                     proc.stdin.close()
