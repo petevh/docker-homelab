@@ -695,9 +695,16 @@ class StreamProxy:
             "-map", "0:v:0", "-map", "0:a:0?",
             "-c:v", "copy", "-c:a", "aac", "-ar", "16000", "-b:a", "32k",
             "-f", "rtsp", "-rtsp_transport", "tcp", self.rtsp_publish_url,
-            # Output 2: RTSP for WebRTC/WHEP (H264 passthrough + OPUS audio)
+            # Output 2: RTSP for WebRTC/WHEP (H264 passthrough + OPUS audio).
+            # The door's audio has jittery/backward timestamps; libopus rejects
+            # non-monotonic input ("Non-monotonic DTS" -> stalls -> broken pipe ->
+            # whole ffmpeg restarts -> relay churn -> WebRTC sessions drop). The
+            # aresample async filter smooths timestamps to a steady clock so the
+            # Opus encoder gets monotonic input and the pipeline stays stable.
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-c:v", "copy", "-c:a", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "32k",
+            "-c:v", "copy",
+            "-af", "aresample=async=1000:first_pts=0",
+            "-c:a", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "32k",
             "-f", "rtsp", "-rtsp_transport", "tcp", webrtc_url,
             # Output 3: MJPEG snapshots
             "-map", "0:v:0",
