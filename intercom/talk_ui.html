@@ -81,13 +81,47 @@ snap.onload = () => { if(!videoLive) snap.classList.add('show'); };
 snap.src = `/frame?key=${encodeURIComponent(KEY)}&t=${Date.now()}`;
 function hideSnap(){ videoLive=true; snap.classList.remove('show'); }
 
-// ---- Downlink: HLS video+audio (the door's picture AND incoming audio) ----
+// ---- Downlink: WebRTC (WHEP, low-latency) with HLS fallback ----
+// Try WebRTC first for sub-second downlink; if ICE/media fails to connect we
+// fall back to HLS so the page always works. Signaling is same-origin (/whep,
+// via Traefik/HTTPS); media is direct UDP (self-encrypted, no cert).
 const vid = $('video');
 const hlsUrl = `/hls/frontdoor/index.m3u8`;
-vid.onplaying = () => { status('VIDEO PLAYING'); hideSnap(); };
+let downlinkChosen=false;   // once WebRTC OR HLS is playing, don't switch
+vid.onplaying = () => { status('VIDEO PLAYING'); hideSnap(); downlinkChosen=true; };
 vid.onstalled = () => status('video stalled');
 vid.onerror = () => status('video el error: '+(vid.error&&vid.error.code));
+
+let pc=null;
+async function useWebRTC(){
+  try{
+    status('webrtc: negotiating…');
+    pc = new RTCPeerConnection();
+    pc.addTransceiver('video', {direction:'recvonly'});
+    pc.addTransceiver('audio', {direction:'recvonly'});
+    pc.ontrack = ev => { if(vid.srcObject!==ev.streams[0]){ vid.srcObject = ev.streams[0]; vid.play().catch(()=>{}); } };
+    pc.onconnectionstatechange = () => {
+      status('webrtc: '+pc.connectionState);
+      if(pc.connectionState==='failed'){ pc.close(); pc=null; if(!downlinkChosen) useHlsJs(); }
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const r = await fetch('/whep/frontdoor/whep', {
+      method:'POST', headers:{'Content-Type':'application/sdp'}, body:offer.sdp
+    });
+    if(!r.ok){ throw new Error('whep '+r.status); }
+    const answer = await r.text();
+    await pc.setRemoteDescription({type:'answer', sdp:answer});
+    // safety net: if media never connects, fall back to HLS
+    setTimeout(()=>{ if(!downlinkChosen){ status('webrtc: no media in 6s → HLS'); try{pc&&pc.close();}catch(e){} pc=null; useHlsJs(); } }, 6000);
+  }catch(e){
+    status('webrtc failed ('+e.message+') → HLS');
+    try{ pc&&pc.close(); }catch(_){} pc=null;
+    if(!downlinkChosen) useHlsJs();
+  }
+}
 function useHlsJs(){
+  if(downlinkChosen) return;
   const s = document.createElement('script');
   s.src = '/hls.min.js';
   s.onload = () => {
@@ -107,7 +141,7 @@ function useHlsJs(){
 }
 // tap-to-start fallback for autoplay policies
 vid.addEventListener('click', ()=>vid.play().catch(()=>{}));
-useHlsJs();
+useWebRTC();   // [spike] WebRTC first, HLS fallback inside
 
 // ---- Unlock ----
 $('unlock').onclick = async () => {

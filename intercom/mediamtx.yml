@@ -25,7 +25,18 @@ hlsSegmentCount: 3          # minimum mpegts needs; fewer = closer to live edge
 # produced variable 2s/3s segments and an "iOS clients" warning. Let mediamtx
 # align to the GOP. The latency win comes from hls.js liveSyncDurationCount:1
 # (talk_ui.html) keeping the player one segment behind the live edge (~2s).
-webrtc: no
+
+# WebRTC (WHEP) — low-latency (<1s) downlink for the /talk-ui page. SPIKE.
+# Signaling (HTTP) is proxied same-origin via the app's /whep route (through
+# Traefik = HTTPS, no mixed-content). Media is UDP and self-encrypted (DTLS-SRTP,
+# no cert needed) on webrtcLocalUDPAddress, exposed directly on the container.
+# Phone reaches 192.168.20.203 both on home-LAN and over Tailscale (subnet router
+# advertises 192.168.20.0/24), so ONE advertised host covers both.
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: [192.168.20.203]
+webrtcIPsFromInterfaces: no   # advertise only the host above (avoid docker-internal 172.x ICE candidates)
 rtmp: no
 srt: no
 

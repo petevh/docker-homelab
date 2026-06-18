@@ -6,6 +6,7 @@ services:
     ports:
       - "8000:8000"
       - "8554:8554"   # RTSP (H264 passthrough + audio) for Home Assistant
+      - "8189:8189/udp"   # WebRTC media (DTLS-SRTP, self-encrypted) — talk-ui downlink [spike]
     networks:
       - traefik
     environment:

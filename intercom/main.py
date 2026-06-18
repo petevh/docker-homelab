@@ -363,6 +363,61 @@ def hls_proxy(path: str):
                     headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/whep/{path:path}")
+async def whep_offer(path: str, request: Request):
+    """Proxy mediamtx WebRTC/WHEP signaling (localhost:8889) same-origin so the
+    talk-ui page negotiates over HTTPS via Traefik (no mixed-content, no extra
+    cert). [SPIKE] Low-latency (<1s) downlink alternative to HLS.
+
+    Only the SDP OFFER/ANSWER handshake goes through here (plain HTTP). The actual
+    audio/video is UDP on :8189 (DTLS-SRTP, self-encrypted) and flows DIRECTLY
+    browser<->mediamtx — it does NOT pass through this proxy or Traefik.
+    The 'Location' header from mediamtx is rewritten to a same-origin /whep/... URL
+    so the browser's follow-up PATCH/DELETE come back through here too."""
+    if _stream_proxy:
+        _stream_proxy.touch()   # on-demand: wake/keep the relay while watched
+        # cold start: wait for the stream to be published before negotiating
+        for _ in range(20):
+            try:
+                if requests.options(f"http://127.0.0.1:8889/{path}", timeout=2).status_code < 500:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+    body = await request.body()
+    try:
+        r = requests.post(f"http://127.0.0.1:8889/{path}", data=body,
+                          headers={"Content-Type": request.headers.get("Content-Type", "application/sdp")},
+                          timeout=10, allow_redirects=False)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"WHEP upstream: {e}")
+    headers = {}
+    loc = r.headers.get("Location")
+    if loc:
+        # rewrite absolute/relative upstream resource path to same-origin /whep/...
+        headers["Location"] = "/whep/" + loc.lstrip("/")
+    if "ETag" in r.headers:
+        headers["ETag"] = r.headers["ETag"]
+    return Response(content=r.content, status_code=r.status_code,
+                    media_type=r.headers.get("Content-Type", "application/sdp"),
+                    headers=headers)
+
+
+@app.api_route("/whep/{path:path}", methods=["PATCH", "DELETE"])
+async def whep_ice(path: str, request: Request):
+    """Proxy WHEP ICE-trickle (PATCH) and teardown (DELETE) to mediamtx."""
+    body = await request.body()
+    try:
+        r = requests.request(request.method, f"http://127.0.0.1:8889/{path}",
+                             data=body,
+                             headers={"Content-Type": request.headers.get("Content-Type", "application/trickle-ice-sdpfrag")},
+                             timeout=10, allow_redirects=False)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"WHEP upstream: {e}")
+    return Response(content=r.content, status_code=r.status_code,
+                    media_type=r.headers.get("Content-Type", "application/sdp"))
+
+
 @app.get("/hls.min.js")
 def hls_js():
     """Vendored hls.js so the talk page has no external CDN dependency."""
