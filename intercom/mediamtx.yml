@@ -10,11 +10,21 @@ protocols: [tcp]
 
 # HLS on for the /talk-ui duplex page (browser plays video+audio together).
 # Standard (mpegts) HLS — broadest browser/hls.js compatibility (LL-HLS fMP4
-# was rejected by iOS Safari native player). Slightly higher latency, reliable.
+# was rejected by iOS Safari native player). Reliable, but HLS is file/segment
+# based so it has an inherent latency floor ≈ segmentDuration × segments-behind.
+# Tuned for low latency: 1s segments, minimum count. With hls.js
+# liveSyncDurationCount:1 (talk_ui.html) this gives ~1–1.5s downlink delay
+# (was ~3s at the mediamtx defaults + liveSyncDurationCount:3).
 hls: yes
 hlsAddress: :8888
 hlsVariant: mpegts
 hlsAlwaysRemux: yes
+hlsSegmentCount: 3          # minimum mpegts needs; fewer = closer to live edge
+# NOTE: do NOT force hlsSegmentDuration below the stream's keyframe interval.
+# Segments must start on a keyframe; the door's GOP is ~2s, so a 1s request
+# produced variable 2s/3s segments and an "iOS clients" warning. Let mediamtx
+# align to the GOP. The latency win comes from hls.js liveSyncDurationCount:1
+# (talk_ui.html) keeping the player one segment behind the live edge (~2s).
 webrtc: no
 rtmp: no
 srt: no

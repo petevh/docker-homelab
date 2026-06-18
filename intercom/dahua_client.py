@@ -597,6 +597,20 @@ class StreamProxy:
         self._frame: bytes = b""
         self._running      = False
         self._thread: Optional[threading.Thread] = None
+        # Last-frame cache: persist the most recent JPEG to disk so /frame can
+        # serve an instant (if slightly stale) snapshot even when the relay is
+        # cold — closes the ~8s blank-screen gap on a cold page load. Refreshes
+        # to live as soon as the relay warms.
+        self._frame_cache_path = os.environ.get(
+            "DAHUA_FRAME_CACHE", "/tmp/frontdoor_last.jpg")
+        self._last_cache_write = 0.0
+        try:
+            with open(self._frame_cache_path, "rb") as f:
+                cached = f.read()
+            if len(cached) > 1000:
+                self._frame = cached    # warm-start /frame with the last image
+        except OSError:
+            pass
         # On-demand: relay runs only while there are active viewers. After the
         # last viewer leaves we keep it alive a short grace period, then stop —
         # so we don't hold a cloud relay session (and hammer auth) 24/7.
@@ -811,6 +825,17 @@ class StreamProxy:
                     if len(jpeg) > 1000:
                         with self._lock:
                             self._frame = jpeg
+                        # Persist occasionally so a cold start has a recent image.
+                        now = time.time()
+                        if now - self._last_cache_write > 10:
+                            self._last_cache_write = now
+                            try:
+                                tmp = self._frame_cache_path + ".tmp"
+                                with open(tmp, "wb") as f:
+                                    f.write(jpeg)
+                                os.replace(tmp, self._frame_cache_path)
+                            except OSError:
+                                pass
         except Exception:
             pass
 
@@ -1120,6 +1145,12 @@ class TalkbackSession:
         self._t0 = 0.0
         self._frames_sent = 0
         self._opened = False
+        # Live push-to-talk: cap how far the send buffer may grow so latency
+        # can't accumulate (a live mic must stay near the live edge — drop stale
+        # audio rather than play out an ever-growing backlog at 40ms/frame).
+        # OFF for clip playback (play_audio_clip), where every frame must be sent.
+        self.live = False
+        self._max_backlog_frames = 3   # ~120ms of slack before we drop oldest
 
     # -- relay plumbing -----------------------------------------------------
     def _open_relay(self, encrypt: bool) -> tuple[str, str, int]:
@@ -1221,6 +1252,18 @@ class TalkbackSession:
         if src_rate != TALK_AUDIO_RATE:
             samples = _resample_to_16k(samples, src_rate)
         self._pcm_buf.extend(samples)
+        # Live: bound the backlog so lag can't accumulate. The browser delivers
+        # mic audio in bursts and _send_frame paces at 40ms/frame against an
+        # absolute clock — so any backlog becomes permanent latency. Drop the
+        # OLDEST buffered audio beyond the cap, keeping us near the live edge,
+        # and re-anchor the pacing clock to now so the kept audio plays out fresh.
+        if self.live:
+            cap = self._max_backlog_frames * TALK_FRAME_SAMPLES
+            if len(self._pcm_buf) > cap:
+                del self._pcm_buf[:len(self._pcm_buf) - cap]
+                # reset the absolute pacing schedule to the current send count
+                self._t0 = time.monotonic() - self._frames_sent * (
+                    TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
         while len(self._pcm_buf) >= TALK_FRAME_SAMPLES and not self._stop.is_set():
             self._send_frame(self._pcm_buf[:TALK_FRAME_SAMPLES])
             del self._pcm_buf[:TALK_FRAME_SAMPLES]

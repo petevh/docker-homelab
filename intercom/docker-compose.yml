@@ -32,6 +32,10 @@ services:
       - DAHUA_STREAM=${DAHUA_STREAM:-0}
       - DAHUA_STREAM_WIDTH=${DAHUA_STREAM_WIDTH:-0}
       - DAHUA_STREAM_QUALITY=${DAHUA_STREAM_QUALITY:-5}
+      # Last-frame snapshot cache — lets /frame serve an instant stale image on
+      # a cold start instead of a black screen. In-container path (/tmp): survives
+      # a restart, resets on rebuild (first open after a rebuild waits for live).
+      - DAHUA_FRAME_CACHE=/tmp/frontdoor_last.jpg
       # Optional: push doorbell rings straight to a Home Assistant webhook
       - HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-}
       # Direct VTH connection (doorbell event subscription)

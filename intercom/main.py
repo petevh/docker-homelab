@@ -162,6 +162,18 @@ def _post_ha_webhook(call_id: str, local_time: str) -> None:
 
 
 def _on_ring(call_id: str, local_time: str) -> None:
+    # Pre-warm the cloud relay the instant the bell rings, so video is already
+    # up by the time someone opens the app/talk-ui to answer (closes the ~8s
+    # cold-start gap for the doorbell-answer flow). touch() starts the relay and
+    # resets the idle grace; repeated touches below extend the warm window so it
+    # doesn't idle out in the seconds before the door is answered.
+    if _stream_proxy:
+        def _prewarm():
+            for _ in range(8):          # keep warm ~40s past the ring
+                _stream_proxy.touch()
+                time.sleep(5)
+        threading.Thread(target=_prewarm, daemon=True).start()
+
     payload = f'data: {{"event":"doorbell_ring","call_id":"{call_id}","local_time":"{local_time}"}}\n\n'
     with _ring_listeners_lock:
         for q in list(_ring_listeners):
@@ -652,6 +664,7 @@ async def talk_ws(ws: WebSocket):
     log.info("Talk (push-to-talk) by '%s'", label or "anonymous")
     rate = int(ws.query_params.get("rate", "16000"))
     sess = _new_talk_session()
+    sess.live = True   # live mic: bound backlog so latency can't accumulate
     try:
         await asyncio.to_thread(sess.start)
         await ws.send_json({"event": "talk_started", "max_seconds": TALK_MAX_SECONDS})

@@ -10,7 +10,7 @@
   body { margin:0; background:#111; color:#eee; font-family:-apple-system,system-ui,sans-serif;
          display:flex; flex-direction:column; height:100dvh; }
   header { padding:10px 14px; font-size:18px; font-weight:600; background:#1b1b1b; }
-  #video { flex:1; min-height:0; background:#000; object-fit:contain; width:100%; }
+  #video { width:100%; height:100%; min-height:0; background:#000; object-fit:contain; }
   #status { padding:6px 14px; font-size:13px; color:#9aa; min-height:22px; }
   .controls { display:flex; gap:10px; padding:14px; padding-bottom:max(14px,env(safe-area-inset-bottom)); background:#1b1b1b; }
   button { flex:1; border:0; border-radius:14px; padding:18px 8px; font-size:16px; font-weight:600;
@@ -22,11 +22,37 @@
   #mute { background:#37474f; }
   #mute.muted { background:#b71c1c; }
   .icon { font-size:22px; display:block; margin-bottom:4px; }
+  /* DMSS-style live mic indicator, overlaid on the video while transmitting */
+  #video-wrap { flex:1; min-height:0; position:relative; display:flex; background:#000; }
+  /* Instant snapshot shown while HLS warms up; crossfades out when video plays. */
+  #snap { position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
+          background:#000; opacity:0; transition:opacity .4s ease; pointer-events:none; z-index:1; }
+  #snap.show { opacity:1; }
+  #video { position:relative; z-index:0; }
+  #micind { z-index:2; }
+  #micind { position:absolute; top:10px; left:10px; display:none; align-items:center; gap:8px;
+            padding:7px 12px 7px 10px; border-radius:20px; background:rgba(20,20,20,.62);
+            backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); }
+  #micind.on { display:flex; }
+  #micind .dot { width:9px; height:9px; border-radius:50%; background:#2e7d32;
+                 box-shadow:0 0 0 0 rgba(46,125,50,.7); animation:micpulse 1.4s infinite; }
+  #micind .mi { font-size:16px; line-height:1; }
+  #micind .lbl { font-size:13px; font-weight:600; color:#eee; letter-spacing:.2px; }
+  #micbars { display:flex; align-items:flex-end; gap:3px; height:18px; margin-left:2px; }
+  #micbars i { width:3px; height:3px; border-radius:2px; background:#7cd67c; transition:height .06s linear; }
+  @keyframes micpulse { 0%{box-shadow:0 0 0 0 rgba(46,125,50,.7);} 70%{box-shadow:0 0 0 9px rgba(46,125,50,0);} 100%{box-shadow:0 0 0 0 rgba(46,125,50,0);} }
 </style>
 </head>
 <body>
 <header>🔔 Front Door</header>
-<video id="video" autoplay playsinline></video>
+<div id="video-wrap">
+  <img id="snap" alt="">
+  <video id="video" autoplay playsinline></video>
+  <div id="micind">
+    <span class="dot"></span><span class="mi">🎙️</span><span class="lbl">On air</span>
+    <span id="micbars"><i></i><i></i><i></i><i></i><i></i></span>
+  </div>
+</div>
 <div id="status">connecting…</div>
 <div class="controls">
   <button id="mute"><span class="icon">🔊</span>Mute</button>
@@ -41,10 +67,24 @@ const status = m => { _log.push(m); $('status').textContent = _log.slice(-4).joi
 window.onerror = (msg,src,ln) => status('JSERR: '+msg+' @'+ln);
 status('page loaded, key='+(KEY?('set('+KEY.length+')'):'MISSING'));
 
+// ---- Instant snapshot while the HLS stream warms up ----
+// /frame returns the latest JPEG AND wakes the on-demand relay (which HLS needs),
+// so showing it on load doubles as the stream warm-up trigger. It fades out the
+// moment live video starts; if the stream never comes up it stays as a fallback.
+// Show the cached snapshot ONCE on load, then crossfade to live video when HLS
+// plays. No refresh loop: a fresh /frame becomes ready at ~the same time as the
+// video (both gated by the relay+ffmpeg cold-start), so re-fetching the stale
+// image while waiting adds nothing. The /frame request also wakes the relay.
+const snap = $('snap');
+let videoLive=false;
+snap.onload = () => { if(!videoLive) snap.classList.add('show'); };
+snap.src = `/frame?key=${encodeURIComponent(KEY)}&t=${Date.now()}`;
+function hideSnap(){ videoLive=true; snap.classList.remove('show'); }
+
 // ---- Downlink: HLS video+audio (the door's picture AND incoming audio) ----
 const vid = $('video');
 const hlsUrl = `/hls/frontdoor/index.m3u8`;
-vid.onplaying = () => status('VIDEO PLAYING');
+vid.onplaying = () => { status('VIDEO PLAYING'); hideSnap(); };
 vid.onstalled = () => status('video stalled');
 vid.onerror = () => status('video el error: '+(vid.error&&vid.error.code));
 function useHlsJs(){
@@ -53,7 +93,7 @@ function useHlsJs(){
   s.onload = () => {
     status('hls.js loaded, supported='+(window.Hls&&Hls.isSupported()));
     if (window.Hls && Hls.isSupported()) {
-      const hls = new Hls({liveSyncDurationCount:3});
+      const hls = new Hls({liveSyncDurationCount:1, liveMaxLatencyDurationCount:5, lowLatencyMode:true});
       hls.loadSource(hlsUrl); hls.attachMedia(vid);
       hls.on(Hls.Events.MANIFEST_PARSED, ()=>{ status('manifest ok'); vid.play().then(()=>status('play ok')).catch(e=>status('tap video to start ('+e.name+')')); });
       hls.on(Hls.Events.ERROR, (e,d)=>{ status('hls '+(d.fatal?'FATAL ':'')+d.type+'/'+d.details); });
@@ -88,7 +128,34 @@ $('mute').onclick = () => {
 
 // ---- Uplink: mic -> 16k PCM -> WebSocket /talk/ws ----
 let ws=null, audioCtx=null, micStream=null, node=null, talking=false;
+let analyser=null, meterRAF=0;
 const TARGET_RATE=16000;
+const micBars = () => Array.from(document.querySelectorAll('#micbars i'));
+
+function startMicMeter(){
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  const bars = micBars();
+  const tick = () => {
+    if(!analyser){ return; }
+    analyser.getByteFrequencyData(buf);
+    // RMS-ish level 0..1 across the low/voice bins
+    let sum=0; const n=Math.min(buf.length,32);
+    for(let i=0;i<n;i++){ sum += buf[i]*buf[i]; }
+    const level = Math.min(1, Math.sqrt(sum/n)/110);
+    bars.forEach((b,i)=>{
+      // each bar a bit taller than the last; scaled by current level + idle floor
+      const peak = level * (0.5 + i*0.16);
+      b.style.height = (3 + peak*15).toFixed(1)+'px';
+    });
+    meterRAF = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function stopMicMeter(){
+  if(meterRAF) cancelAnimationFrame(meterRAF); meterRAF=0;
+  $('micind').classList.remove('on');
+  micBars().forEach(b=>b.style.height='3px');
+}
 
 async function startTalk(){
   if(talking) return;
@@ -105,6 +172,13 @@ async function startTalk(){
   ws.onmessage = ev => { /* {event:talk_started} etc */ };
 
   const src = audioCtx.createMediaStreamSource(micStream);
+  // Live mic indicator: AnalyserNode tapped off the same mic source drives the
+  // level bars from your ACTUAL voice (like DMSS), not a fake animation.
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  $('micind').classList.add('on');
+  startMicMeter();
   // ScriptProcessor (broad support); resample ctx.sampleRate -> 16k, float->int16
   node = audioCtx.createScriptProcessor(4096,1,1);
   let resampleBuf=[];
@@ -126,11 +200,13 @@ async function startTalk(){
 }
 function stopTalk(fromClose){
   talking=false; $('talk').classList.remove('on');
+  stopMicMeter();
   try{ if(ws && !fromClose && ws.readyState===1){ ws.send(JSON.stringify({cmd:'stop'})); ws.close(); } }catch(e){}
   try{ node && node.disconnect(); }catch(e){}
+  try{ analyser && analyser.disconnect(); }catch(e){}
   try{ micStream && micStream.getTracks().forEach(t=>t.stop()); }catch(e){}
   try{ audioCtx && audioCtx.close(); }catch(e){}
-  ws=null; node=null; micStream=null; audioCtx=null;
+  ws=null; node=null; micStream=null; audioCtx=null; analyser=null;
   if(!fromClose) status('live');
 }
 // toggle talk (tap to start, tap to stop — duplex stays open while on)
