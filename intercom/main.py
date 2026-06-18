@@ -699,6 +699,48 @@ async def say(request: Request, text: str = "", auth=Depends(verify_api_key)):
         _talk_lock.release()
 
 
+@app.post("/talk/stream")
+async def talk_stream(request: Request):
+    """Ingest a CONTINUOUS raw-PCM mic stream over a streaming HTTP POST and feed
+    it to the door, same as /talk/ws but for a producer that can't speak WebSocket.
+
+    Built for the HA Advanced Camera Card path: go2rtc's exec backchannel pipes the
+    card's mic to ffmpeg, which POSTs it here as a never-ending body, e.g.
+        ffmpeg -f <fmt> -i - -ar 16000 -ac 1 -f s16le -content_type application/octet-stream \
+               -method POST http://<intercom>:8000/talk/stream?key=<API_KEY>&rate=16000
+    The encryption/framing is unchanged — this just bridges PCM into a TalkbackSession.
+
+    Auth: ?key=<API key> (query, so ffmpeg needs no custom headers). Body = 16-bit LE
+    mono PCM at ?rate (default 16000). One talk session at a time (same lock as /talk/ws).
+    """
+    label = _label_for(request.query_params.get("key"))
+    if AUTH_ENABLED and label is None:
+        client = request.client.host if request.client else "?"
+        log.warning("401 — invalid/missing API key from %s on /talk/stream", client)
+        raise HTTPException(status_code=401, detail="invalid API key")
+    if not _talk_ready():
+        raise HTTPException(status_code=503, detail="talk not configured")
+    if not _talk_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="talk already active")
+
+    log.info("Talk (mic stream) by '%s'", label or "anonymous")
+    rate = int(request.query_params.get("rate", "16000"))
+    sess = _new_talk_session()
+    sess.live = True   # live mic: bound backlog so latency can't accumulate
+    try:
+        await asyncio.to_thread(sess.start)
+        async for chunk in request.stream():
+            if chunk:
+                await asyncio.to_thread(sess.push, chunk, rate)
+    except Exception as e:
+        log.warning("talk/stream error: %s", e)
+    finally:
+        await asyncio.to_thread(sess.close)
+        _talk_lock.release()
+        log.info("Talk (mic stream) ended (by '%s')", label or "anonymous")
+    return Response(status_code=204)
+
+
 @app.websocket("/talk/ws")
 async def talk_ws(ws: WebSocket):
     """Live push-to-talk. Open the socket, stream raw 16-bit LE mono PCM frames
