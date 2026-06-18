@@ -1159,6 +1159,7 @@ class TalkbackSession:
         self._ts_base = int(time.time())
         self._pcm_buf: list[int] = []
         self._t0 = 0.0
+        self._opened_at = 0.0
         self._frames_sent = 0
         self._opened = False
         # Live push-to-talk: cap how far the send buffer may grow so latency
@@ -1218,7 +1219,8 @@ class TalkbackSession:
         self._drain_thread = threading.Thread(target=self._drain, args=(self._sock,),
                                               daemon=True)
         self._drain_thread.start()
-        self._t0 = time.monotonic()
+        self._opened_at = time.monotonic()   # for the max_seconds backstop
+        self._t0 = time.monotonic()           # pacing anchor; re-set at first frame
         self._opened = True
         log.info("Talkback session open (device %s)", self.device_sn)
 
@@ -1248,6 +1250,14 @@ class TalkbackSession:
         self._idx += 1
         self._rtp_seq += 1
         self._rtp_ts += len(samps)
+        # Anchor the pacing clock to the FIRST frame actually sent, not to session
+        # open. start() runs seconds before the user speaks; if _t0 is the session
+        # time, the schedule is already far in the past when audio begins, so every
+        # frame's target is < now → no sleep → we BLAST the whole stream faster than
+        # realtime into the door's jitter buffer → a constant multi-second delay
+        # that never clears. Anchoring at first frame keeps us paced to real time.
+        if self._frames_sent == 0:
+            self._t0 = time.monotonic()
         self._frames_sent += 1
         # pace against an absolute schedule (no drift), realtime 40ms/frame
         target = self._t0 + self._frames_sent * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
@@ -1260,7 +1270,7 @@ class TalkbackSession:
         frames. Resamples to 16kHz if src_rate differs. Honors max_seconds."""
         if not self._opened or self._stop.is_set():
             return
-        if time.monotonic() - self._t0 > self.max_seconds:
+        if time.monotonic() - self._opened_at > self.max_seconds:
             log.warning("Talkback max_seconds reached — stopping")
             self.close()
             return
