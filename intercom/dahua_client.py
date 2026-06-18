@@ -682,15 +682,24 @@ class StreamProxy:
         # ffmpeg's dhav demuxer separates video+audio itself, so we feed the whole
         # (de-interleaved) DHAV stream rather than hand-extracting H264.
         scale = f"scale={self.width}:-2," if self.width else ""
+        # WebRTC path = same RTSP host, "<name>_webrtc" — H264 copy + OPUS audio.
+        # WebRTC (and go2rtc / HA Advanced Camera Card) require Opus; it cannot
+        # carry the AAC used by the HLS/HA path. So we publish a second path with
+        # Opus while the primary stays AAC (HLS needs AAC; mpegts+Opus is flaky).
+        webrtc_url = self.rtsp_publish_url + "_webrtc"
         return [
             "ffmpeg", "-loglevel", "warning",
             "-fflags", "+genpts+nobuffer",
             "-f", "dhav", "-i", "pipe:0",
-            # Output 1: RTSP (H264 passthrough + AAC audio)
+            # Output 1: RTSP for HLS + HA (H264 passthrough + AAC audio)
             "-map", "0:v:0", "-map", "0:a:0?",
             "-c:v", "copy", "-c:a", "aac", "-ar", "16000", "-b:a", "32k",
             "-f", "rtsp", "-rtsp_transport", "tcp", self.rtsp_publish_url,
-            # Output 2: MJPEG snapshots
+            # Output 2: RTSP for WebRTC/WHEP (H264 passthrough + OPUS audio)
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "copy", "-c:a", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "32k",
+            "-f", "rtsp", "-rtsp_transport", "tcp", webrtc_url,
+            # Output 3: MJPEG snapshots
             "-map", "0:v:0",
             "-vf", f"{scale}format=yuvj420p",
             "-q:v", str(self.quality), "-r", "5",

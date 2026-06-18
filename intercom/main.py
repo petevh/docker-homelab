@@ -376,21 +376,27 @@ async def whep_offer(path: str, request: Request):
     so the browser's follow-up PATCH/DELETE come back through here too."""
     if _stream_proxy:
         _stream_proxy.touch()   # on-demand: wake/keep the relay while watched
-        # cold start: wait for the stream to be published before negotiating
-        for _ in range(20):
-            try:
-                if requests.options(f"http://127.0.0.1:8889/{path}", timeout=2).status_code < 500:
-                    break
-            except Exception:
-                pass
-            time.sleep(0.5)
     body = await request.body()
-    try:
-        r = requests.post(f"http://127.0.0.1:8889/{path}", data=body,
-                          headers={"Content-Type": request.headers.get("Content-Type", "application/sdp")},
-                          timeout=10, allow_redirects=False)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"WHEP upstream: {e}")
+    ctype = request.headers.get("Content-Type", "application/sdp")
+    # Cold-start race: on first load the browser POSTs the offer BEFORE the relay
+    # has published the stream to mediamtx, so mediamtx returns 404 ("no one is
+    # publishing"). The old check (OPTIONS < 500) passed on 404 and negotiated too
+    # early → fell back to HLS. Instead, retry the actual offer until mediamtx
+    # accepts it (non-404) or we time out (~15s, covers the cold relay+ffmpeg).
+    r = None
+    for _ in range(30):
+        try:
+            r = requests.post(f"http://127.0.0.1:8889/{path}", data=body,
+                              headers={"Content-Type": ctype},
+                              timeout=10, allow_redirects=False)
+            if r.status_code != 404:
+                break
+        except Exception as e:
+            r = None
+            last_err = e
+        time.sleep(0.5)
+    if r is None:
+        raise HTTPException(status_code=502, detail=f"WHEP upstream: {last_err}")
     headers = {}
     loc = r.headers.get("Location")
     if loc:

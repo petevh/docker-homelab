@@ -106,7 +106,7 @@ async function useWebRTC(){
     };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    const r = await fetch('/whep/frontdoor/whep', {
+    const r = await fetch('/whep/frontdoor_webrtc/whep', {
       method:'POST', headers:{'Content-Type':'application/sdp'}, body:offer.sdp
     });
     if(!r.ok){ throw new Error('whep '+r.status); }

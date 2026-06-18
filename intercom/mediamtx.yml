@@ -44,3 +44,8 @@ paths:
   frontdoor:
     # published to by the proxy's ffmpeg; no auth (container-internal + LAN behind traefik)
     source: publisher
+  frontdoor_webrtc:
+    # second publish from the same ffmpeg: H264 copy + OPUS audio, for WebRTC/WHEP
+    # (and the future go2rtc / HA Advanced Camera Card). WebRTC can't carry the
+    # AAC on 'frontdoor'; this Opus path is the WebRTC-compatible feed.
+    source: publisher
