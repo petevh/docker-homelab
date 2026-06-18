@@ -9,6 +9,7 @@ services:
       - "8189:8189/udp"   # WebRTC media (DTLS-SRTP, self-encrypted) — talk-ui downlink [spike]
     networks:
       - traefik
+      - intercom-internal   # shared with go2rtc (it reaches intercom:8000/8554)
     environment:
       # API auth — named, individually-revocable keys ("label:key,...")
       - DAHUA_API_KEYS=${DAHUA_API_KEYS:-}
@@ -72,6 +73,32 @@ services:
       - "traefik.http.routers.intercom.tls.certresolver=cloudflare"
       - "traefik.http.routers.intercom.middlewares=dahua-ratelimit,dahua-ipallowlist"
 
+  # go2rtc for the HA Advanced Camera Card full-duplex intercom. We run our OWN
+  # instance (HA's built-in go2rtc can't define the exec backchannel). Downlink =
+  # the intercom's frontdoor_webrtc (Opus); uplink = card mic → exec ffmpeg →
+  # intercom /talk/stream. The Advanced Camera Card points at this go2rtc (port 1984).
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: intercom-go2rtc
+    restart: unless-stopped
+    depends_on:
+      - intercom
+    networks:
+      - traefik
+      - intercom-internal
+    ports:
+      - "1984:1984"        # go2rtc API + web UI (the card connects here)
+      - "8555:8555/tcp"    # WebRTC media (TCP)
+      - "8555:8555/udp"    # WebRTC media (UDP)
+    environment:
+      # Intercom API key (the 'ha' label value) for the exec backchannel POST to
+      # /talk/stream. From .env — NOT committed.
+      - INTERCOM_API_KEY=${INTERCOM_API_KEY}
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+
 networks:
   traefik:
     external: true
+  intercom-internal:
+    driver: bridge

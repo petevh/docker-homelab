@@ -1,0 +1,32 @@
+# go2rtc config for the HA Advanced Camera Card full-duplex intercom.
+# Runs as a container alongside the intercom (we control it — HA's BUILT-IN go2rtc
+# can't define exec sources). The card points at THIS go2rtc.
+#
+# Secrets: ${INTERCOM_API_KEY} is substituted from the env (set in docker-compose
+# from .env). The API key is NOT written here — do not hardcode it.
+
+streams:
+  frontdoor:
+    # DOWNLINK: low-latency H264 + Opus pulled from the intercom's WebRTC RTSP path.
+    - rtsp://intercom:8554/frontdoor_webrtc
+    # UPLINK (two-way audio backchannel): the card's mic arrives here over WebRTC;
+    # go2rtc pipes it to this ffmpeg's stdin, which POSTs a continuous 16k mono PCM
+    # stream to the intercom's /talk/stream (→ TalkbackSession → door, encrypted).
+    # 'backchannel=1' marks this as the return-audio sink; audio=pcm/48000 is what
+    # the pipe delivers, which ffmpeg resamples to 16000 for the door.
+    - exec:ffmpeg -hide_banner -loglevel error -f s16be -ar 48000 -ac 1 -i -
+        -ar 16000 -ac 1 -f s16le
+        -content_type application/octet-stream -method POST
+        "http://intercom:8000/talk/stream?key=${INTERCOM_API_KEY}&rate=16000"#backchannel=1#audio=pcm/48000
+
+webrtc:
+  # WebRTC for the card. Media UDP on 8555 (distinct from the intercom's 8189).
+  listen: ":8555"
+  candidates:
+    - 192.168.20.203:8555
+
+api:
+  listen: ":1984"   # go2rtc API + web UI (the card connects here)
+
+rtsp:
+  listen: ":8553"   # go2rtc's own RTSP (avoid clashing with intercom's 8554)
