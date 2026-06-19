@@ -1104,6 +1104,12 @@ TALK_AES_KEY = bytes.fromhex(os.environ.get("DAHUA_TALK_AES_KEY", ""))
 
 TALK_AUDIO_RATE   = 16000      # PCMA sample rate (the SDP's PCMA/16000 was right)
 TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz; 640B a-law payload (AES-encrypted)
+# Seconds to wait after opening the video-hold before starting talk. Was a flat 3.0
+# (= the observed talkback delay — likely the cause). Tunable to find the minimum.
+# Gap between the 6 handshake PLAYs. DMSS pipelines them fast (first audio ~0.13s
+# after the last PLAY); the old code used 0.15s + a separate 1.5-3s video-hold warmup
+# = the ~3s talkback delay. Small gap → talk starts almost immediately like DMSS.
+TALK_HANDSHAKE_GAP = float(os.environ.get("DAHUA_TALK_HANDSHAKE_GAP", "0.05"))
 TALK_CHANNEL      = 10         # interleave channel of the uplink
 TALK_PTYPE        = 8          # RTP payload type: PCMA
 TALK_HANDSHAKE = [             # exact 6-PLAY sequence DMSS sends, one socket
@@ -1231,32 +1237,32 @@ class TalkbackSession:
         relay_url = get_relay_url(tok, bearer, self.pcs_username, self.device_sn,
                                   channel=self.channel, stream=0, encrypt=True)
         hp, hpath = relay_url.split("/", 1)
-        hhost, hport = hp.rsplit(":", 1)
+        thost, tport = hp.rsplit(":", 1)
+        tport = int(tport)
+        tpath = hpath
 
-        # 1) hold the video session so the door is a live media session
-        self._hold_sock = socket.create_connection((hhost, int(hport)), timeout=15)
-        self._hold_sock.sendall(
-            (f"PLAY /{hpath}{'&' if '?' in hpath else '?'}trackID=31&method=0 "
-             f"HTTP/1.1\r\nHost: {hhost}:{hport}\r\nAccpet-Sdp: Private\r\n"
-             f"Connection: keep-alive\r\nCseq: 1\r\n\r\n").encode())
-        threading.Thread(target=self._drain, args=(self._hold_sock,), daemon=True).start()
-        time.sleep(3)   # let the media session come up
-
-        # 2) talk on the SAME relay URL (new socket) + 6-PLAY handshake
-        thost, tport, tpath = hhost, int(hport), hpath
-        self._sock = socket.create_connection((thost, int(tport)), timeout=15)
+        # SINGLE-SOCKET handshake, mirroring DMSS. The old code opened a SEPARATE
+        # video-hold socket, slept 1.5-3s, then opened a SECOND socket for the talk
+        # handshake — and DMSS captures show DMSS does it all on ONE socket and sends
+        # the first audio frame ~0.13s after the last PLAY (vs our multi-second gap),
+        # which is the ~3s talkback delay. The talk handshake already begins with
+        # trackID=31&method=0 (the media-session/hold), so the separate hold socket
+        # was redundant. Run the whole handshake on one socket, minimal pacing, then
+        # send audio immediately (the caller's push() follows right after start()).
+        self._sock = socket.create_connection((thost, tport), timeout=15)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sep = "&" if "?" in tpath else "?"
         for cseq, params in enumerate(TALK_HANDSHAKE, 1):
             self._sock.sendall(
                 (f"PLAY /{tpath}{sep}{params} HTTP/1.1\r\nHost: {thost}:{tport}\r\n"
                  f"Accpet-Sdp: Private\r\nConnection: keep-alive\r\nCseq: {cseq}\r\n\r\n").encode())
-            self._sock.settimeout(2.0)
+            # brief read for the response, but don't block long — DMSS pipelines fast
+            self._sock.settimeout(0.5)
             try:
                 self._sock.recv(4096)
             except socket.timeout:
                 pass
-            time.sleep(0.15)
+            time.sleep(TALK_HANDSHAKE_GAP)
         # 3) drain the talk socket while we send (else TCP backpressure stalls)
         self._drain_thread = threading.Thread(target=self._drain, args=(self._sock,),
                                               daemon=True)
