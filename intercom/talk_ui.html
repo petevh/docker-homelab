@@ -92,17 +92,41 @@ vid.onplaying = () => { status('VIDEO PLAYING'); hideSnap(); downlinkChosen=true
 vid.onstalled = () => status('video stalled');
 vid.onerror = () => status('video el error: '+(vid.error&&vid.error.code));
 
-let pc=null;
+// Downlink with AUTO-RECOVERY: prefer WebRTC; if it drops (disconnected/failed/
+// closed) reconnect WebRTC a few times before falling back to HLS; if HLS also
+// fails, keep retrying. A doorbell must self-heal, not get stuck on a dead frame.
+let pc=null, webrtcTries=0, hlsActive=false, recovering=false;
+const MAX_WEBRTC_TRIES=4;
+
+function teardownPc(){ try{ pc&&pc.close(); }catch(e){} pc=null; }
+
+function recoverDownlink(why){
+  if(recovering) return; recovering=true;
+  status('downlink lost ('+why+') — recovering…');
+  teardownPc();
+  // give the server a moment (it may be mid relay-rotation/ffmpeg restart)
+  setTimeout(()=>{ recovering=false;
+    if(webrtcTries < MAX_WEBRTC_TRIES){ useWebRTC(); }
+    else { status('webrtc exhausted → HLS'); useHlsJs(); }
+  }, 1500);
+}
+
 async function useWebRTC(){
+  webrtcTries++;
+  hlsActive=false;
   try{
-    status('webrtc: negotiating…');
+    status('webrtc: negotiating… ('+webrtcTries+')');
     pc = new RTCPeerConnection();
     pc.addTransceiver('video', {direction:'recvonly'});
     pc.addTransceiver('audio', {direction:'recvonly'});
     pc.ontrack = ev => { if(vid.srcObject!==ev.streams[0]){ vid.srcObject = ev.streams[0]; vid.play().catch(()=>{}); } };
     pc.onconnectionstatechange = () => {
-      status('webrtc: '+pc.connectionState);
-      if(pc.connectionState==='failed'){ pc.close(); pc=null; if(!downlinkChosen) useHlsJs(); }
+      const st = pc ? pc.connectionState : 'closed';
+      status('webrtc: '+st);
+      if(st==='connected'){ webrtcTries=0; }   // healthy → reset retry budget
+      else if(st==='failed' || st==='disconnected' || st==='closed'){
+        recoverDownlink(st);
+      }
     };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -112,31 +136,40 @@ async function useWebRTC(){
     if(!r.ok){ throw new Error('whep '+r.status); }
     const answer = await r.text();
     await pc.setRemoteDescription({type:'answer', sdp:answer});
-    // safety net: if media never connects, fall back to HLS
-    setTimeout(()=>{ if(!downlinkChosen){ status('webrtc: no media in 6s → HLS'); try{pc&&pc.close();}catch(e){} pc=null; useHlsJs(); } }, 6000);
   }catch(e){
-    status('webrtc failed ('+e.message+') → HLS');
-    try{ pc&&pc.close(); }catch(_){} pc=null;
-    if(!downlinkChosen) useHlsJs();
+    status('webrtc error ('+e.message+')');
+    recoverDownlink('offer-error');
   }
 }
+let hlsObj=null;
 function useHlsJs(){
-  if(downlinkChosen) return;
-  const s = document.createElement('script');
-  s.src = '/hls.min.js';
-  s.onload = () => {
-    status('hls.js loaded, supported='+(window.Hls&&Hls.isSupported()));
+  if(hlsActive) return; hlsActive=true;
+  vid.srcObject = null;   // drop any dead WebRTC stream before HLS attaches
+  const start = () => {
     if (window.Hls && Hls.isSupported()) {
-      const hls = new Hls({liveSyncDurationCount:1, liveMaxLatencyDurationCount:5, lowLatencyMode:true});
-      hls.loadSource(hlsUrl); hls.attachMedia(vid);
-      hls.on(Hls.Events.MANIFEST_PARSED, ()=>{ status('manifest ok'); vid.play().then(()=>status('play ok')).catch(e=>status('tap video to start ('+e.name+')')); });
-      hls.on(Hls.Events.ERROR, (e,d)=>{ status('hls '+(d.fatal?'FATAL ':'')+d.type+'/'+d.details); });
+      if(hlsObj){ try{hlsObj.destroy();}catch(e){} }
+      hlsObj = new Hls({liveSyncDurationCount:1, liveMaxLatencyDurationCount:5, lowLatencyMode:true});
+      hlsObj.loadSource(hlsUrl); hlsObj.attachMedia(vid);
+      hlsObj.on(Hls.Events.MANIFEST_PARSED, ()=>{ status('manifest ok'); vid.play().catch(e=>status('tap video ('+e.name+')')); });
+      hlsObj.on(Hls.Events.ERROR, (e,d)=>{
+        status('hls '+(d.fatal?'FATAL ':'')+d.type+'/'+d.details);
+        if(d.fatal){
+          // self-heal instead of dying (ffmpeg restarts make the playlist blip).
+          // Periodically retry WebRTC too — it may have recovered server-side.
+          if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ try{hlsObj.startLoad();}catch(_){ } }
+          else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ try{hlsObj.recoverMediaError();}catch(_){ } }
+          else { try{hlsObj.destroy();}catch(_){ } hlsObj=null; hlsActive=false; setTimeout(useHlsJs,2000); }
+        }
+      });
     } else if (vid.canPlayType('application/vnd.apple.mpegurl')) {
-      // fallback to native only if hls.js unsupported
       vid.src = hlsUrl; vid.play().catch(e=>status('native blocked: '+e.name));
     } else { status('no HLS support'); }
   };
-  s.onerror = () => status('FAILED to load /hls.min.js');
+  if(window.Hls){ start(); return; }
+  const s = document.createElement('script');
+  s.src = '/hls.min.js';
+  s.onload = start;
+  s.onerror = () => { status('FAILED to load /hls.min.js'); hlsActive=false; };
   document.head.appendChild(s);
 }
 // tap-to-start fallback for autoplay policies
