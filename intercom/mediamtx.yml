@@ -18,7 +18,13 @@ protocols: [tcp]
 hls: yes
 hlsAddress: :8888
 hlsVariant: mpegts
-hlsAlwaysRemux: yes
+# hlsAlwaysRemux MUST stay OFF: it forces an HLS muxer for EVERY path, including
+# frontdoor_webrtc (Opus). mpegts-HLS can't carry Opus → mediamtx errors every ~10s
+# ("MPEG-TS variant of HLS supports MPEG-4 Audio only") and tears down the RTSP
+# publisher → broken pipe → ffmpeg restart → relay churn → WebRTC sessions DROP
+# ("webrtc: disconnected/failed"). HLS is created on demand by the /hls proxy
+# (which only ever requests the AAC 'frontdoor' path), so always-remux isn't needed.
+hlsAlwaysRemux: no
 hlsSegmentCount: 3          # minimum mpegts needs; fewer = closer to live edge
 # NOTE: do NOT force hlsSegmentDuration below the stream's keyframe interval.
 # Segments must start on a keyframe; the door's GOP is ~2s, so a 1s request
