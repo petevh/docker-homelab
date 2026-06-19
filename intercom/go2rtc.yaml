@@ -10,14 +10,17 @@ streams:
     # DOWNLINK: low-latency H264 + Opus pulled from the intercom's WebRTC RTSP path.
     - rtsp://intercom:8554/frontdoor_webrtc
     # UPLINK (two-way audio backchannel): the card's mic arrives here over WebRTC;
-    # go2rtc pipes it to this ffmpeg's stdin, which POSTs a continuous 16k mono PCM
-    # stream to the intercom's /talk/stream (→ TalkbackSession → door, encrypted).
-    # 'backchannel=1' marks this as the return-audio sink; audio=pcm/48000 is what
-    # the pipe delivers, which ffmpeg resamples to 16000 for the door.
-    - exec:ffmpeg -hide_banner -loglevel error -f s16be -ar 48000 -ac 1 -i -
+    # go2rtc pipes it to this ffmpeg's stdin, which POSTs it to the intercom's
+    # /talk/stream (→ TalkbackSession → door, encrypted). 'backchannel=1' marks
+    # this as the return-audio SINK. The codec token MUST be a real go2rtc format
+    # (s16le/16000 or alaw/8000) — 'pcm/48000' is NOT recognized, so go2rtc never
+    # offered the backchannel to the browser and the exec never ran. Use s16le/16000,
+    # which is exactly what /talk/stream wants (16k mono PCM) → no resample needed,
+    # just pipe stdin straight through.
+    - exec:ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i -
         -ar 16000 -ac 1 -f s16le
         -content_type application/octet-stream -method POST
-        "http://intercom:8000/talk/stream?key=${INTERCOM_API_KEY}&rate=16000"#backchannel=1#audio=pcm/48000
+        "http://intercom:8000/talk/stream?key=${INTERCOM_API_KEY}&rate=16000"#backchannel=1#audio=s16le/16000
 
 webrtc:
   # WebRTC for the card. Media UDP on 8555 (distinct from the intercom's 8189).
