@@ -618,6 +618,7 @@ class StreamProxy:
         self._idle_since: Optional[float] = None
         self._idle_grace   = 30.0          # seconds to linger after last viewer
         self._relay_running = False        # is the cloud relay loop active now
+        self._loop_thread: Optional[threading.Thread] = None  # the active _run_loop
 
     def start(self):
         """Begin the idle-watcher. The relay itself only runs while viewers>0."""
@@ -655,20 +656,37 @@ class StreamProxy:
         with self._lock:
             if self._relay_running:
                 return
+            # Don't start a new loop while the previous one is still tearing down
+            # its ffmpeg (proc.terminate can take up to ~3s). Otherwise two ffmpegs
+            # briefly publish to the same RTSP path → mediamtx "closing existing
+            # publisher" → broken pipe → restart storm. Wait for the old thread.
+            if self._loop_thread is not None and self._loop_thread.is_alive():
+                return
             self._relay_running = True
-        threading.Thread(target=self._run_loop, daemon=True).start()
+            self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._loop_thread.start()
 
     def _supervisor(self):
         """Stop the relay once there are no long-lived viewers AND no recent
-        touch (HLS fetch) within the grace period."""
+        touch (HLS fetch) within the grace period. Also restarts the relay if a
+        viewer is waiting but the previous loop was still tearing down when
+        _ensure_relay was last called (avoids a stranded down-relay)."""
         while self._running:
-            time.sleep(5)
+            time.sleep(2)
             with self._lock:
                 idle = (self._viewers == 0 and self._idle_since is not None
                         and time.time() - self._idle_since > self._idle_grace)
+                # a viewer is active/recent but the relay isn't running and the old
+                # loop has finished tearing down → (re)start it
+                wants_relay = (not idle and not self._relay_running
+                               and self._idle_since is not None
+                               and (self._loop_thread is None
+                                    or not self._loop_thread.is_alive()))
             if idle and self._relay_running:
                 log.info("Stream idle — stopping cloud relay (on-demand)")
                 self._relay_running = False     # _run_loop checks this and exits
+            elif wants_relay:
+                self._ensure_relay()
 
     def get_frame(self) -> bytes:
         with self._lock:
