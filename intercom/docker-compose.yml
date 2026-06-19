@@ -96,6 +96,18 @@ services:
       - INTERCOM_API_KEY=${INTERCOM_API_KEY}
     volumes:
       - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    labels:
+      # HTTPS access to go2rtc's API/UI so its built-in WebRTC test page works in a
+      # secure context (the browser mic / getUserMedia needs HTTPS). IP-allowlisted
+      # (Tailscale + home LAN) like the intercom; reuses the dahua-ipallowlist mw.
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.go2rtc.rule=Host(`intercom-go2rtc.app.vanheerden.ch`)"
+      - "traefik.http.routers.go2rtc.entrypoints=websecure"
+      - "traefik.http.routers.go2rtc.tls=true"
+      - "traefik.http.routers.go2rtc.tls.certresolver=cloudflare"
+      - "traefik.http.routers.go2rtc.middlewares=dahua-ipallowlist"
+      - "traefik.http.services.go2rtc.loadbalancer.server.port=1984"
 
 networks:
   traefik:
