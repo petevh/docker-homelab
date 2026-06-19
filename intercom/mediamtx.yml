@@ -53,6 +53,17 @@ webrtcIPsFromInterfaces: no   # advertise only the host above (avoid docker-inte
 rtmp: no
 srt: no
 
+pathDefaults:
+  # When a reader requests a path that has no publisher yet (cold on-demand relay),
+  # poke the intercom to wake the relay. go2rtc/WebRTC/HA read mediamtx directly and
+  # otherwise never trigger the app's touch() — so the WebRTC card was dead until
+  # something else (talk-ui) warmed it. runOnDemand fires on the first reader and is
+  # killed when readers leave; we just curl /wake and idle (the publish comes from
+  # the intercom side). 10s timeout covers the relay cold-start.
+  runOnDemand: sh -c "curl -s -m 3 http://127.0.0.1:8000/wake >/dev/null; sleep 3600"
+  runOnDemandStartTimeout: 20s   # cold relay takes ~6-10s to connect + publish
+  runOnDemandCloseAfter: 10s
+
 paths:
   frontdoor:
     # published to by the proxy's ffmpeg; no auth (container-internal + LAN behind traefik)

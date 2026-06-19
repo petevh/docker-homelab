@@ -477,6 +477,18 @@ def unlock(auth=Depends(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/wake")
+def wake():
+    """Wake the on-demand relay. Called by mediamtx's runOnDemand when a reader
+    (go2rtc/WebRTC/HA) connects to a path — those consume from mediamtx directly
+    and otherwise never wake the relay, so the WebRTC card was dead on a cold start
+    until something else (talk-ui /frame) warmed it. No auth: localhost-only call
+    from mediamtx, and it only starts the camera relay (no control/unlock)."""
+    if _stream_proxy:
+        _stream_proxy.touch()
+    return {"waking": True}
+
+
 @app.get("/frame")
 def frame(auth=Depends(verify_api_key)):
     """Latest JPEG snapshot from VTO camera. Use as HA still_image_url."""
