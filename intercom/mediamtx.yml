@@ -8,6 +8,13 @@ rtsp: yes
 rtspAddress: :8554
 protocols: [tcp]
 
+# Local API so the app can count ACTIVE READERS per path. WebRTC/HLS/go2rtc/HA
+# viewers consume from mediamtx directly and bypass the app's own viewer counter,
+# so the on-demand supervisor must ask mediamtx "does the feed still have readers?"
+# before stopping the relay — otherwise it stops mid-stream and everyone drops.
+api: yes
+apiAddress: 127.0.0.1:9997
+
 # HLS on for the /talk-ui duplex page (browser plays video+audio together).
 # Standard (mpegts) HLS — broadest browser/hls.js compatibility (LL-HLS fMP4
 # was rejected by iOS Safari native player). Reliable, but HLS is file/segment

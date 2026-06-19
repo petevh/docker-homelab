@@ -666,16 +666,40 @@ class StreamProxy:
             self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
             self._loop_thread.start()
 
+    def _mediamtx_readers(self) -> int:
+        """Active reader count across both publish paths, via the mediamtx API.
+        WebRTC/HLS/go2rtc/HA viewers consume from mediamtx directly and bypass our
+        own viewer counter — so without this the supervisor declares 'idle' while a
+        WebRTC stream is live and stops the relay mid-stream. Returns -1 if the API
+        can't be reached (treated as 'unknown' → don't stop on that alone)."""
+        try:
+            base = "http://127.0.0.1:9997/v3/paths/get/"
+            total = 0
+            for name in ("frontdoor", "frontdoor_webrtc"):
+                r = requests.get(base + name, timeout=1)
+                if r.status_code == 200:
+                    total += len(r.json().get("readers", []))
+            return total
+        except Exception:
+            return -1
+
     def _supervisor(self):
         """Stop the relay once there are no long-lived viewers AND no recent
-        touch (HLS fetch) within the grace period. Also restarts the relay if a
-        viewer is waiting but the previous loop was still tearing down when
-        _ensure_relay was last called (avoids a stranded down-relay)."""
+        touch (HLS fetch) within the grace period AND mediamtx has no readers.
+        Also restarts the relay if a viewer is waiting but the previous loop was
+        still tearing down when _ensure_relay was last called."""
         while self._running:
             time.sleep(2)
             with self._lock:
                 idle = (self._viewers == 0 and self._idle_since is not None
                         and time.time() - self._idle_since > self._idle_grace)
+            # Don't stop while mediamtx still has active readers (WebRTC/HLS/go2rtc/
+            # HA). Only consult the API when we'd otherwise stop — keeps it cheap.
+            if idle and self._relay_running and self._mediamtx_readers() > 0:
+                idle = False
+                with self._lock:
+                    self._idle_since = time.time()   # reset grace; readers present
+            with self._lock:
                 # a viewer is active/recent but the relay isn't running and the old
                 # loop has finished tearing down → (re)start it
                 wants_relay = (not idle and not self._relay_running
