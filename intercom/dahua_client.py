@@ -1220,6 +1220,7 @@ class TalkbackSession:
         self._t0 = 0.0
         self._opened_at = 0.0
         self._frames_sent = 0
+        self._primed = False   # set once the prime pre-buffer has filled + released
         self._opened = False
         # Live push-to-talk: cap how far the send buffer may grow so latency
         # can't accumulate (a live mic must stay near the live edge — drop stale
@@ -1345,13 +1346,24 @@ class TalkbackSession:
         if src_rate != TALK_AUDIO_RATE:
             samples = _resample_to_16k(samples, src_rate)
         self._pcm_buf.extend(samples)
+        # PRIME pre-buffer: a live mic only delivers ~2 frames per push, so to
+        # actually burst TALK_PRIME_FRAMES (like DMSS) we first WAIT until that many
+        # frames are buffered, THEN release them all back-to-back (the burst in
+        # _send_frame). Costs ~PRIME*40ms of startup, buys a real full prime of the
+        # door's jitter buffer. Until primed, hold the audio (don't send, don't cap).
+        if self.live and not self._primed:
+            if len(self._pcm_buf) < TALK_PRIME_FRAMES * TALK_FRAME_SAMPLES:
+                return                      # keep buffering until we have a full prime
+            self._primed = True             # now release the whole burst below
         # Live: bound the backlog so lag can't accumulate. The browser delivers
         # mic audio in bursts and _send_frame paces at 40ms/frame against an
         # absolute clock — so any backlog becomes permanent latency. Drop the
         # OLDEST buffered audio beyond the cap, keeping us near the live edge,
         # and re-anchor the pacing clock to now so the kept audio plays out fresh.
         if self.live:
-            cap = self._max_backlog_frames * TALK_FRAME_SAMPLES
+            # cap floor = the prime size, so the initial prime buffer survives to be
+            # burst-sent (the burst frames go out with no sleep, so they don't linger).
+            cap = max(self._max_backlog_frames, TALK_PRIME_FRAMES) * TALK_FRAME_SAMPLES
             if len(self._pcm_buf) > cap:
                 del self._pcm_buf[:len(self._pcm_buf) - cap]
                 # re-anchor using the SAME post-burst formula as _send_frame
