@@ -1220,7 +1220,6 @@ class TalkbackSession:
         self._t0 = 0.0
         self._opened_at = 0.0
         self._frames_sent = 0
-        self._primed = False   # set once the prime pre-buffer has filled + released
         self._opened = False
         # Live push-to-talk: cap how far the send buffer may grow so latency
         # can't accumulate (a live mic must stay near the live edge — drop stale
@@ -1282,6 +1281,20 @@ class TalkbackSession:
         self._opened_at = time.monotonic()   # for the max_seconds backstop
         self._t0 = time.monotonic()           # pacing anchor; re-set at first frame
         self._opened = True
+        # PRIME the door's jitter buffer with SILENT frames, burst back-to-back, the
+        # instant the session opens — this is what makes DMSS sub-second over the same
+        # relay. The 48207c54 capture shows DMSS's first ~4-7 frames are SILENCE
+        # (rms~8), bursted, BEFORE real speech (frame 8+). Sending silent primers up
+        # front fills the door's receive buffer immediately, so when real audio
+        # arrives it plays out live — with ZERO delay to the user's actual speech
+        # (unlike pre-buffering real audio, which clips the first word).
+        if TALK_PRIME_FRAMES > 0:
+            silence = [0] * TALK_FRAME_SAMPLES
+            for _ in range(TALK_PRIME_FRAMES):
+                try:
+                    self._send_frame(silence)   # burst: _send_frame skips sleep for
+                except Exception:               # the first TALK_PRIME_FRAMES
+                    break
         log.info("Talkback session open (device %s)", self.device_sn)
 
     def _drain(self, sock):
@@ -1346,15 +1359,8 @@ class TalkbackSession:
         if src_rate != TALK_AUDIO_RATE:
             samples = _resample_to_16k(samples, src_rate)
         self._pcm_buf.extend(samples)
-        # PRIME pre-buffer: a live mic only delivers ~2 frames per push, so to
-        # actually burst TALK_PRIME_FRAMES (like DMSS) we first WAIT until that many
-        # frames are buffered, THEN release them all back-to-back (the burst in
-        # _send_frame). Costs ~PRIME*40ms of startup, buys a real full prime of the
-        # door's jitter buffer. Until primed, hold the audio (don't send, don't cap).
-        if self.live and not self._primed:
-            if len(self._pcm_buf) < TALK_PRIME_FRAMES * TALK_FRAME_SAMPLES:
-                return                      # keep buffering until we have a full prime
-            self._primed = True             # now release the whole burst below
+        # (Priming is done up-front in start() with silent frames — see there. Here we
+        # just send real mic audio with the normal backlog cap + realtime pacing.)
         # Live: bound the backlog so lag can't accumulate. The browser delivers
         # mic audio in bursts and _send_frame paces at 40ms/frame against an
         # absolute clock — so any backlog becomes permanent latency. Drop the
@@ -1363,7 +1369,7 @@ class TalkbackSession:
         if self.live:
             # cap floor = the prime size, so the initial prime buffer survives to be
             # burst-sent (the burst frames go out with no sleep, so they don't linger).
-            cap = max(self._max_backlog_frames, TALK_PRIME_FRAMES) * TALK_FRAME_SAMPLES
+            cap = self._max_backlog_frames * TALK_FRAME_SAMPLES
             if len(self._pcm_buf) > cap:
                 del self._pcm_buf[:len(self._pcm_buf) - cap]
                 # re-anchor using the SAME post-burst formula as _send_frame
