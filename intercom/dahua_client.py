@@ -1117,14 +1117,23 @@ TALK_HANDSHAKE_GAP = float(os.environ.get("DAHUA_TALK_HANDSHAKE_GAP", "0.05"))
 TALK_PRIME_FRAMES = int(os.environ.get("DAHUA_TALK_PRIME_FRAMES", "4"))
 TALK_CHANNEL      = 10         # interleave channel of the uplink
 TALK_PTYPE        = 8          # RTP payload type: PCMA
-TALK_HANDSHAKE = [             # exact 6-PLAY sequence DMSS sends, one socket
+# Talk-start handshake. Fresh relay capture (48207c54) shows DMSS sends only THESE 3
+# PLAYs to start, then immediately sends audio. The old code sent 6 — the extra 3
+# (method=2, trackID=31&method=1, trackID=70&method=3) are NOT in DMSS's start (its
+# trackID=6&method=0 / 31&method=3 appear only at TEARDOWN). The old "exact 6-PLAY"
+# comment was a misread. Testing whether the extra PLAYs put the door in a state that
+# adds the ~3s buffering. Set DAHUA_TALK_FULL_HANDSHAKE=1 to restore the old 6.
+_TALK_HANDSHAKE_3 = [
     "trackID=31&method=0",                 # media session
     "talktype=talk&trackID=64&method=0",   # talk start
     "trackID=6&method=1",
-    "method=2",                            # uplink open
+]
+_TALK_HANDSHAKE_6 = _TALK_HANDSHAKE_3 + [
+    "method=2",
     "trackID=31&method=1",
     "trackID=70&method=3",
 ]
+TALK_HANDSHAKE = _TALK_HANDSHAKE_6 if os.environ.get("DAHUA_TALK_FULL_HANDSHAKE","")=="1" else _TALK_HANDSHAKE_3
 
 
 def _linear_to_alaw(sample: int) -> int:
