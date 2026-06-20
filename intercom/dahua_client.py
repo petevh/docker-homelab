@@ -1104,36 +1104,20 @@ TALK_AES_KEY = bytes.fromhex(os.environ.get("DAHUA_TALK_AES_KEY", ""))
 
 TALK_AUDIO_RATE   = 16000      # PCMA sample rate (the SDP's PCMA/16000 was right)
 TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz; 640B a-law payload (AES-encrypted)
-# Seconds to wait after opening the video-hold before starting talk. Was a flat 3.0
-# (= the observed talkback delay — likely the cause). Tunable to find the minimum.
-# Gap between the 6 handshake PLAYs. DMSS pipelines them fast (first audio ~0.13s
-# after the last PLAY); the old code used 0.15s + a separate 1.5-3s video-hold warmup
-# = the ~3s talkback delay. Small gap → talk starts almost immediately like DMSS.
+# Gap between the handshake PLAYs (single socket). DMSS pipelines them fast.
 TALK_HANDSHAKE_GAP = float(os.environ.get("DAHUA_TALK_HANDSHAKE_GAP", "0.05"))
-# Initial-burst frames: send the first N audio frames back-to-back (no pacing) to
-# PRIME the door's receive jitter buffer so playout starts immediately, then pace
-# realtime. DMSS bursts ~4 (captured, 48207c54 pcap). Offline-verified the pacing
-# stays at the live edge (lag ~0.03s, no creep). Tunable to sweep at the door.
-TALK_PRIME_FRAMES = int(os.environ.get("DAHUA_TALK_PRIME_FRAMES", "4"))
 TALK_CHANNEL      = 10         # interleave channel of the uplink
 TALK_PTYPE        = 8          # RTP payload type: PCMA
-# Talk-start handshake. Fresh relay capture (48207c54) shows DMSS sends only THESE 3
-# PLAYs to start, then immediately sends audio. The old code sent 6 — the extra 3
-# (method=2, trackID=31&method=1, trackID=70&method=3) are NOT in DMSS's start (its
-# trackID=6&method=0 / 31&method=3 appear only at TEARDOWN). The old "exact 6-PLAY"
-# comment was a misread. Testing whether the extra PLAYs put the door in a state that
-# adds the ~3s buffering. Set DAHUA_TALK_FULL_HANDSHAKE=1 to restore the old 6.
-_TALK_HANDSHAKE_3 = [
+# Talk-start handshake — DMSS-aligned. A fresh relay capture (DahuaConsole/48207c54)
+# shows DMSS sends exactly THESE 3 PLAYs to start, then audio immediately. (Old code
+# sent 6; the extra 3 — method=2, trackID=31&method=1, trackID=70&method=3 — are NOT
+# in DMSS's start; its trackID=6&method=0 / 31&method=3 appear only at TEARDOWN. The
+# old "exact 6-PLAY" comment was a misread.) Wire-verified: 3 PLAYs → audio flows.
+TALK_HANDSHAKE = [
     "trackID=31&method=0",                 # media session
     "talktype=talk&trackID=64&method=0",   # talk start
     "trackID=6&method=1",
 ]
-_TALK_HANDSHAKE_6 = _TALK_HANDSHAKE_3 + [
-    "method=2",
-    "trackID=31&method=1",
-    "trackID=70&method=3",
-]
-TALK_HANDSHAKE = _TALK_HANDSHAKE_6 if os.environ.get("DAHUA_TALK_FULL_HANDSHAKE","")=="1" else _TALK_HANDSHAKE_3
 
 
 def _linear_to_alaw(sample: int) -> int:
@@ -1179,15 +1163,16 @@ def _dhav_audio_frame(alaw: bytes, idx: int, ts_base: int) -> bytes:
     hdr[4]   = 0xf0
     struct.pack_into("<I", hdr, 8, idx & 0xFFFFFFFF)        # frame seq
     struct.pack_into("<I", hdr, 12, total)                  # total len
-    # ts16 = the 40ms-frame audio clock the door uses to PACE PLAYOUT. DMSS captures
-    # advance this by +40/frame; our original +20/frame (a WIP-era guess, commit
-    # 2264ecd, set before encryption was cracked & never validated for timing) runs
-    # the door's playout clock at HALF speed → the door thinks each 40ms frame is
-    # ~20ms → it accumulates a growing buffer → the steady ~3s talkback delay.
-    # Match DMSS: +40/frame.
+    # ts16 = per-frame audio clock in the DHAV header. NOTE: clean DMSS captures use
+    # +20/frame, but empirically +40 gave the best observed talkback delay (~2.5s vs
+    # ~3s) at the door — kept at 40 as the pragmatic best. The talkback latency was NOT
+    # fully solved (DMSS is sub-second over the same relay; we match it on every readable
+    # wire signal yet stay ~2.5-3s — likely a server-side client-authorization/QoS
+    # difference in the TLS control plane we can't decrypt). See memory
+    # intercom-webrtc-downlink.md "TALKBACK LATENCY — INVESTIGATION CLOSED".
     ts16 = (100 + idx * 40)
     struct.pack_into("<I", hdr, 16, ts_base & 0xFFFFFFFF)   # session ts (epoch sec)
-    struct.pack_into("<H", hdr, 20, ts16 & 0xFFFF)          # +40/frame (matches DMSS)
+    struct.pack_into("<H", hdr, 20, ts16 & 0xFFFF)          # +40 (best-observed)
     hdr[22] = 0x14                                          # extension length (20)
     hdr[23] = sum(hdr[0:23]) & 0xFF                         # header checksum
     return bytes(hdr) + _DHAV_EXT + enc + b"dhav" + struct.pack("<I", total)
@@ -1290,20 +1275,6 @@ class TalkbackSession:
         self._opened_at = time.monotonic()   # for the max_seconds backstop
         self._t0 = time.monotonic()           # pacing anchor; re-set at first frame
         self._opened = True
-        # PRIME the door's jitter buffer with SILENT frames, burst back-to-back, the
-        # instant the session opens — this is what makes DMSS sub-second over the same
-        # relay. The 48207c54 capture shows DMSS's first ~4-7 frames are SILENCE
-        # (rms~8), bursted, BEFORE real speech (frame 8+). Sending silent primers up
-        # front fills the door's receive buffer immediately, so when real audio
-        # arrives it plays out live — with ZERO delay to the user's actual speech
-        # (unlike pre-buffering real audio, which clips the first word).
-        if TALK_PRIME_FRAMES > 0:
-            silence = [0] * TALK_FRAME_SAMPLES
-            for _ in range(TALK_PRIME_FRAMES):
-                try:
-                    self._send_frame(silence)   # burst: _send_frame skips sleep for
-                except Exception:               # the first TALK_PRIME_FRAMES
-                    break
         log.info("Talkback session open (device %s)", self.device_sn)
 
     def _drain(self, sock):
@@ -1336,21 +1307,13 @@ class TalkbackSession:
         # open. start() runs seconds before the user speaks; if _t0 is the session
         # time, the schedule is already far in the past when audio begins, so every
         # frame's target is < now → no sleep → we BLAST the whole stream faster than
-        # realtime into the door's jitter buffer → a constant multi-second delay
-        # that never clears. Anchoring at first frame keeps us paced to real time.
+        # realtime into the door's jitter buffer. Anchoring at first frame keeps us
+        # paced to real time.
+        if self._frames_sent == 0:
+            self._t0 = time.monotonic()
         self._frames_sent += 1
-        # INITIAL BURST (prime the door's jitter buffer) then realtime pacing.
-        # DMSS (captured over the same relay) bursts the first ~4 frames back-to-back
-        # so the door starts playing immediately, then paces ~40ms/frame. The first
-        # TALK_PRIME_FRAMES go out with NO sleep; pacing then runs from the END of the
-        # burst. CRITICAL: the post-burst schedule and the backlog-cap re-anchor must
-        # both use (frames_sent - TALK_PRIME_FRAMES) — mismatched formulas caused a
-        # runaway buffer (14s) before. Offline-verified: lag stays ~0.03s, no creep.
-        if self._frames_sent <= TALK_PRIME_FRAMES:
-            self._t0 = time.monotonic()   # anchor at the last burst frame
-            return                        # burst: send now, no pacing sleep
-        n = self._frames_sent - TALK_PRIME_FRAMES   # frames since burst ended
-        target = self._t0 + n * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
+        # pace against an absolute schedule (no drift), realtime 40ms/frame
+        target = self._t0 + self._frames_sent * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
         d = target - time.monotonic()
         if d > 0:
             time.sleep(d)
@@ -1376,16 +1339,11 @@ class TalkbackSession:
         # OLDEST buffered audio beyond the cap, keeping us near the live edge,
         # and re-anchor the pacing clock to now so the kept audio plays out fresh.
         if self.live:
-            # cap floor = the prime size, so the initial prime buffer survives to be
-            # burst-sent (the burst frames go out with no sleep, so they don't linger).
             cap = self._max_backlog_frames * TALK_FRAME_SAMPLES
             if len(self._pcm_buf) > cap:
                 del self._pcm_buf[:len(self._pcm_buf) - cap]
-                # re-anchor using the SAME post-burst formula as _send_frame
-                # (frames_sent - TALK_PRIME_FRAMES) — mismatch here caused the 14s
-                # runaway. After the burst, target ≈ now so kept audio plays fresh.
-                n = max(0, self._frames_sent - TALK_PRIME_FRAMES)
-                self._t0 = time.monotonic() - n * (
+                # reset the absolute pacing schedule to the current send count
+                self._t0 = time.monotonic() - self._frames_sent * (
                     TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
         while len(self._pcm_buf) >= TALK_FRAME_SAMPLES and not self._stop.is_set():
             self._send_frame(self._pcm_buf[:TALK_FRAME_SAMPLES])
