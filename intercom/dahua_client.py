@@ -1110,6 +1110,11 @@ TALK_FRAME_SAMPLES = 640       # 40ms/frame @16kHz; 640B a-law payload (AES-encr
 # after the last PLAY); the old code used 0.15s + a separate 1.5-3s video-hold warmup
 # = the ~3s talkback delay. Small gap → talk starts almost immediately like DMSS.
 TALK_HANDSHAKE_GAP = float(os.environ.get("DAHUA_TALK_HANDSHAKE_GAP", "0.05"))
+# Initial-burst frames: send the first N audio frames back-to-back (no pacing) to
+# PRIME the door's receive jitter buffer so playout starts immediately, then pace
+# realtime. DMSS bursts ~4 (captured, 48207c54 pcap). Offline-verified the pacing
+# stays at the live edge (lag ~0.03s, no creep). Tunable to sweep at the door.
+TALK_PRIME_FRAMES = int(os.environ.get("DAHUA_TALK_PRIME_FRAMES", "4"))
 TALK_CHANNEL      = 10         # interleave channel of the uplink
 TALK_PTYPE        = 8          # RTP payload type: PCMA
 TALK_HANDSHAKE = [             # exact 6-PLAY sequence DMSS sends, one socket
@@ -1310,11 +1315,19 @@ class TalkbackSession:
         # frame's target is < now → no sleep → we BLAST the whole stream faster than
         # realtime into the door's jitter buffer → a constant multi-second delay
         # that never clears. Anchoring at first frame keeps us paced to real time.
-        if self._frames_sent == 0:
-            self._t0 = time.monotonic()
         self._frames_sent += 1
-        # pace against an absolute schedule (no drift), realtime 40ms/frame
-        target = self._t0 + self._frames_sent * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
+        # INITIAL BURST (prime the door's jitter buffer) then realtime pacing.
+        # DMSS (captured over the same relay) bursts the first ~4 frames back-to-back
+        # so the door starts playing immediately, then paces ~40ms/frame. The first
+        # TALK_PRIME_FRAMES go out with NO sleep; pacing then runs from the END of the
+        # burst. CRITICAL: the post-burst schedule and the backlog-cap re-anchor must
+        # both use (frames_sent - TALK_PRIME_FRAMES) — mismatched formulas caused a
+        # runaway buffer (14s) before. Offline-verified: lag stays ~0.03s, no creep.
+        if self._frames_sent <= TALK_PRIME_FRAMES:
+            self._t0 = time.monotonic()   # anchor at the last burst frame
+            return                        # burst: send now, no pacing sleep
+        n = self._frames_sent - TALK_PRIME_FRAMES   # frames since burst ended
+        target = self._t0 + n * (TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
         d = target - time.monotonic()
         if d > 0:
             time.sleep(d)
@@ -1341,8 +1354,11 @@ class TalkbackSession:
             cap = self._max_backlog_frames * TALK_FRAME_SAMPLES
             if len(self._pcm_buf) > cap:
                 del self._pcm_buf[:len(self._pcm_buf) - cap]
-                # reset the absolute pacing schedule to the current send count
-                self._t0 = time.monotonic() - self._frames_sent * (
+                # re-anchor using the SAME post-burst formula as _send_frame
+                # (frames_sent - TALK_PRIME_FRAMES) — mismatch here caused the 14s
+                # runaway. After the burst, target ≈ now so kept audio plays fresh.
+                n = max(0, self._frames_sent - TALK_PRIME_FRAMES)
+                self._t0 = time.monotonic() - n * (
                     TALK_FRAME_SAMPLES / TALK_AUDIO_RATE)
         while len(self._pcm_buf) >= TALK_FRAME_SAMPLES and not self._stop.is_set():
             self._send_frame(self._pcm_buf[:TALK_FRAME_SAMPLES])

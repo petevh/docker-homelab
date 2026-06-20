@@ -29,6 +29,7 @@ services:
       # Talkback (push audio to door speaker); hard backstop against stuck-open mic
       - DAHUA_TALK_MAX_SECONDS=${DAHUA_TALK_MAX_SECONDS:-180}
       - DAHUA_TALK_HANDSHAKE_GAP=${DAHUA_TALK_HANDSHAKE_GAP:-0.05}   # talk handshake pacing (latency)
+      - DAHUA_TALK_PRIME_FRAMES=${DAHUA_TALK_PRIME_FRAMES:-4}   # initial burst to prime door buffer
       # AES-128-ECB talk encryption key (hex) — required for talkback audio
       - DAHUA_TALK_AES_KEY=${DAHUA_TALK_AES_KEY:-}
       # Stream output: STREAM 0=main/HD 1280x720, 1=sub 352x288; WIDTH 0=native
