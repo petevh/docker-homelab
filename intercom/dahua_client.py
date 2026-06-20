@@ -1165,9 +1165,15 @@ def _dhav_audio_frame(alaw: bytes, idx: int, ts_base: int) -> bytes:
     hdr[4]   = 0xf0
     struct.pack_into("<I", hdr, 8, idx & 0xFFFFFFFF)        # frame seq
     struct.pack_into("<I", hdr, 12, total)                  # total len
-    ts16 = (100 + idx * 20)
+    # ts16 = the 40ms-frame audio clock the door uses to PACE PLAYOUT. DMSS captures
+    # advance this by +40/frame; our original +20/frame (a WIP-era guess, commit
+    # 2264ecd, set before encryption was cracked & never validated for timing) runs
+    # the door's playout clock at HALF speed → the door thinks each 40ms frame is
+    # ~20ms → it accumulates a growing buffer → the steady ~3s talkback delay.
+    # Match DMSS: +40/frame.
+    ts16 = (100 + idx * 40)
     struct.pack_into("<I", hdr, 16, ts_base & 0xFFFFFFFF)   # session ts (epoch sec)
-    struct.pack_into("<H", hdr, 20, ts16 & 0xFFFF)          # +20/frame
+    struct.pack_into("<H", hdr, 20, ts16 & 0xFFFF)          # +40/frame (matches DMSS)
     hdr[22] = 0x14                                          # extension length (20)
     hdr[23] = sum(hdr[0:23]) & 0xFF                         # header checksum
     return bytes(hdr) + _DHAV_EXT + enc + b"dhav" + struct.pack("<I", total)
