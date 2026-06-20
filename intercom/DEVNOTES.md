@@ -26,6 +26,19 @@ Reverse-engineered from a clean OPNsense capture of a real DMSS talk session, pl
 an Android-emulator + Frida key extraction. **We can send arbitrary generated
 audio** (live mic via `/talk/ws`, WAV clips via `/talk`, piper TTS via `/say`).
 
+> **Talkback LATENCY note:** there is a constant ~2.5–3s delay (mic → door speaker)
+> that we could NOT eliminate. DMSS is sub-second over the *same* relay; we matched it
+> on every signal readable on the wire (handshake, send pacing, timestamps, the relay's
+> SDP response) yet stayed ~2.5–3s. Leading speculation: a server-side client-
+> authorization/QoS difference in the encrypted TLS control plane we can't decrypt — so
+> no frame/handshake tuning fixes it. Current code is the DMSS-aligned best-observed
+> state (ts16 +40, single-socket 3-PLAY handshake). **Full forensic record of all ~9
+> experiments + the captures is in the `dahua-intercom` repo:
+> `DahuaConsole/TALKBACK_LATENCY_INVESTIGATION.md`.** Experiment git history is on
+> branch `talk-singlesocket-latency`. Don't re-chase it with send-side tuning — that
+> path is exhausted; the only untried angle is decrypting the TLS control plane
+> (rooted phone + Frida).
+
 1. **Hold an `encrypt=2` video session** (`/real/1/1/encrypt/RTSV1`). Precondition:
    an idle door 503s the talk PLAY, AND an `encrypt=0` session silently **mutes**
    the uplink audio. `encrypt=2` is mandatory.
