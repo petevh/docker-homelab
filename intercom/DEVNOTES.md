@@ -4,20 +4,23 @@ Research and reverse engineering lives in `/mnt/development/DahuaConsole/` (sepa
 project). Bring working solutions here once confirmed in that repo. Full protocol
 analysis is in `DahuaConsole/NEXT_STEPS.md` — read it before touching this service.
 
-## Current Status (2026-06-17)
+## Current Status (2026-06-21)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `/unlock` | **Working** | Cloud API via `dmss-di.dolynkcloud.com` |
-| `/frame` | **Working** | Clean full-frame JPEG (RTP de-interleave fix, 2026-06-12). Wakes on-demand relay via `touch()` (2026-06-17) |
-| `/stream` | **Working** | Clean MJPEG |
-| `/events` | **Working** | SSE stream fires on doorbell ring via direct DHIP to VTH |
-| `/talk` | **Working** | POST a WAV/PCM clip → door speaker. Confirmed audible at door 2026-06-16 |
-| `/talk/ws` | **Working** | WebSocket push-to-talk; confirmed audible at door via `/talk-ui` 2026-06-17 (live mic) |
-| `/say` | **Working** | piper TTS → door speaker; confirmed audible at door 2026-06-16 |
-| HA generic_camera | Ready to wire | Stream quality fixed |
-| HA webhook trigger | Ready to wire | Consume `/events` SSE |
-| HA two-way audio | **Working via `/talk-ui`** | Duplex web page: HLS downlink + WS mic uplink. Downlink ~3s latency (HLS); uplink low-latency |
+| `/frame` | **Working** | Clean full-frame JPEG. Serves instant cached last-frame on cold start (~2ms) before relay wakes |
+| `/stream` | **Working** | Async MJPEG; releases relay on unclean disconnect (`is_disconnected()` + supervisor safety net) |
+| `/events` | **Working** | SSE + HA webhook fire on doorbell ring via direct DHIP to VTH. CallID dedup is now time-windowed (was a permanent set that dropped re-used CallIDs) |
+| `/talk`, `/talk/ws`, `/say` | **Working** | Door speaker — clip / live mic / piper TTS. Confirmed audible |
+| Relay keepalive | **Working** | One token mint per viewing session, held by re-sending the same PLAY every ~40s (DMSS's mechanism). Idle-stops cleanly when no viewers. ~20x fewer cloud calls than the old per-65s rotation |
+| HA WebRTC Camera card | **Working (verified 2026-06-21)** | Video + door audio + mic→door (open-mic). Sub-second talkback |
+| HA Advanced Camera Card | **Working (verified 2026-06-21)** | Same backend; explicit hold-to-talk mic button. Sub-second talkback |
+| HA two-way audio via `/talk-ui` | **Working** | Standalone web page (no HA client needed). ~2s talkback latency (non-WebRTC path) |
+| Doorbell → HA notification | **Working** | press → `IgnoreInvite` → webhook → HA fires same second. Phone-side delivery via FCM (see notes) |
+
+See **"Session 2026-06-21"** at the bottom for the keepalive/leak fixes, the HA card
+verification, and the doorbell-notification investigation.
 
 ## Talkback — How It Works (SOLVED & WORKING — confirmed audible at door 2026-06-16/17)
 
@@ -246,17 +249,20 @@ to `network_mode: host` if the VTH is on the same subnet as the Docker host.
 
 ## Credentials & Device Identifiers
 
-| Item | Value |
-|------|-------|
+> **All secret values live ONLY in `.env` (gitignored) — never in this repo.**
+> The table below lists which `.env` var holds each, plus non-secret device IDs.
+
+| Item | Where / Value |
+|------|---------------|
 | VTH IP | `192.168.40.55` |
 | Device SN | `BG0142EPAJEF6EF` |
-| Device credentials | `user` / `***REMOVED***` |
-| Admin credentials | `admin` / `***REMOVED***` |
+| Device credentials | `DAHUA_DEVICE_USERNAME` / `DAHUA_DEVICE_PASSWORD` (in `.env`) |
+| Admin credentials | device panel only — not stored in this service |
 | Cloud host | `dmss-di.dolynkcloud.com` |
-| Bearer token | `***REMOVED***-01` *(may expire — recapture via DMSS if needed)* |
-| pcs-username | `uuid\***REMOVED***` |
+| Bearer token | `DAHUA_BEARER_TOKEN` (in `.env`) — or minted from `DAHUA_ACCOUNT*` |
+| pcs-username | `DAHUA_PCS_USERNAME` (in `.env`) |
 | VTO channel SN | `BF08FE7PAJE2E59` |
-| RandSalt | `***REMOVED***` |
+| RandSalt | derived/captured value — in `.env` if needed, not committed |
 | Gateway API host | `dmss.dolynkcloud.com/gateway/` *(new API, simpler auth)* |
 
 ## Bearer Token Expiry
@@ -266,3 +272,101 @@ The Bearer token is long-lived but will eventually expire. To recapture:
 2. Run PCAPdroid with TLS key logging
 3. Open DMSS, log in — capture the `Authorization: Bearer` header value
 4. Update `DAHUA_BEARER_TOKEN` in `.env` and restart the container
+
+---
+
+## Session 2026-06-21 — keepalive/leak fixes, HA cards verified, doorbell investigation
+
+### 1. Relay keepalive (replaces per-65s rotation) — the cloud-flag fix
+**Why:** the old design minted a fresh cloud relay token every ~65s while watched
+(~20x more cloud calls than DMSS). Heavy minting is what flagged the Dahua account
+earlier (see DahuaConsole notes). DMSS holds ONE session alive for 20+ min by
+re-sending the SAME `PLAY ...&trackID=31&method=0` (same time/digest token) every ~40s.
+**Fix:** `_RelaySession` now runs a keepalive thread doing exactly that (commit `e1ff532`).
+`STREAM_ROTATE=1` restores the old rotation if ever needed. Result: **1 token mint per
+viewing session**, held indefinitely, re-mint only on genuine session death.
+
+### 2. Viewer-leak / relay-never-stops fix
+**Bug 1 (`/stream`):** the sync MJPEG generator could hang in `time.sleep()` on an
+unclean client disconnect (tab crash, network drop) and never run `release_viewer()`,
+so the relay stayed pinned open forever. **Fix:** `/stream` is now async and checks
+`await request.is_disconnected()` each loop; plus a `StreamProxy` supervisor safety net
+(`_last_activity` / `_hard_idle_grace`) stops the relay if there's no real consumption
+even when `_viewers` leaks. (commit `7ee9566`)
+
+**Bug 2 (the real one):** the keepalive feed loop in `_feed_one_relay_session` checked
+only `self._running and proc.poll()` — NOT `self._relay_running`. Because the keepalive
+holds the session (and ffmpeg) alive forever, there was no natural break, so when the
+supervisor dropped the last viewer (`_relay_running=False`) the loop never noticed and
+fed the relay until the container died. (The old rotation masked this — the 65s TTL used
+to kill the session and break the loop.) **Fix:** add `self._relay_running` to the loop
+condition (commit `d5dad70`). Verified: `kill -9` on a held `/stream` → ffmpeg drops to 0
+at the 30s grace and stays 0; new viewer restarts cleanly; keepalive still holds one mint.
+
+### 3. HA cards — BOTH verified working (the blocker was mixed content)
+The HA dashboard (`/mnt/ha-config/dashboards/front-door.yaml`, YAML-mode) has 3 tabs:
+- **Live** = `custom:webrtc-camera` (AlexxIT) — open-mic, no button.
+- **Advanced** = `custom:advanced-camera-card` — explicit hold-to-talk mic button.
+- **Classic** = generic camera + `/talk-ui` link + piper TTS quick-replies.
+
+**The bug:** both cards pointed at `http://192.168.20.203:1984/` while HA is served over
+HTTPS (required for the mic getUserMedia secure-context). The browser BLOCKED the http://
+go2rtc connection as **mixed content** → card stuck "loading", no consumer, relay never
+woke. On the Advanced card this showed as the ⓘ "stream hasn't loaded" icon even while
+video played. **Fix:** point both cards at the HTTPS Traefik route
+`https://intercom-go2rtc.app.vanheerden.ch` (webrtc-camera `server:`; advanced-camera-card
+`go2rtc: url:`). Also committed `go2rtc.yaml` `api.origin: "*"` so the cross-origin
+WebSocket from HA isn't rejected. The HA dashboard YAML lives in `/mnt/ha-config`, NOT
+this repo.
+
+**Verified (deliberate test, one at a time, frames-to-door confirmed):**
+| Surface | Frames→door | Talkback latency | Mic control |
+|---------|-------------|------------------|-------------|
+| talk-ui | 215 | ~2s | Talk toggle |
+| WebRTC Live | 287 | **sub-second** | open-mic (no button) |
+| Advanced card | 307 | **sub-second** | hold-to-talk button |
+
+Finding: both WebRTC paths are sub-second; talk-ui is ~2s. The go2rtc/WebRTC transport
+beats talk-ui's path for uplink latency. Relay behaved perfectly (1 mint/session, clean
+idle-stop after every close).
+
+**Known rough edge:** the webrtc-camera card is OPEN-MIC — it captures the OS mic the
+whole time it's connected (just to watch), which locks the mic from other apps (e.g.
+WhatsApp). The mixer design (below) addresses this.
+
+### 4. Doorbell ring → HA notification investigation
+**Path:** physical press → VTO calls VTH → container's `subscribe_events` (persistent DHIP
+event stream on TCP/5000) sees `IgnoreInvite+Start` → `on_ring` → fire-and-forget webhook
+POST to HA → HA automation (`Front door ring`) fires → `notify` to phone via FCM.
+
+**Findings (all measured on a common UTC clock):**
+- **Detection is instant.** Container logs `RING!` and HA's automation flips
+  `front_door_ringing` in the **same second**. No latency in the container or HA.
+- **DMSS vs us:** DMSS detects the ring within a few seconds of us (lined up via the VTH
+  call-log times once clock-corrected) — our pipeline is NOT the bottleneck.
+- **The "62s" red herring:** the VTH's embedded `LocaleTime` string was ~62s slow AND on a
+  different offset — comparing it to real time looked like a 62s delay. It wasn't; the
+  container's own clock matched HA exactly. (VTH later NTP'd to `pool.ntp.org`, which
+  fixed the drift but reset its timezone display to UTC — cosmetic, we use container UTC.)
+- **CallID dedup bug found + fixed** (see Status table): the VTH cycles CallIDs 0–9 and
+  reuses them; the old permanent `seen_call_ids` set silently dropped a genuine new press
+  that reused an old CallID. Now time-windowed (`RING_DEDUP_WINDOW`, 5s) — only suppresses
+  the same-instant duplicate burst.
+- **A real press emits a burst:** `AutoRegister`, `IgnoreInvite`, `sdLvMsgAndSnapshot`,
+  `sdReadFlag`, `sdSnapshot` (all same instant). We correctly pick `IgnoreInvite+Start`.
+  Set `DAHUA_EVENT_DEBUG=1` to log every raw event (left on for ongoing diagnostics).
+
+**Remaining (phone-side, not our pipeline):** HA's FCM notification can lag DMSS's instant
+ring. Suspected cause = **on-device contention**: DMSS receives the doorbell as a *call*
+(SIP/VoIP, full-screen-intent via "Appear on top") that **bypasses notification
+permissions** (it rang even after notifications were revoked + force-stop), and that
+screen-takeover preempts HA's FCM notification until it ends. Mitigation = stop DMSS
+handling the call (disable the app / revoke "Appear on top"). DMSS's dedicated push socket
+will always edge out FCM regardless. This is a phone-settings issue, not a code issue.
+
+### 5. Mixer design recorded (NOT built)
+The contention (multi-client / multi-mode / household) and the open-mic problem both point
+to one architecture: the container holds ONE door talkback session and mixes/arbitrates
+client uplinks, with the mic DECOUPLED from the downlink (real push-to-talk). Likely drops
+the go2rtc exec backchannel for a direct client→container uplink (closer to talk-ui's
+model). Full design captured in auto-memory `intercom-mixer-design`. Design pass pending.

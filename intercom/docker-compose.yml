@@ -46,6 +46,8 @@ services:
       - DAHUA_VTH_PORT=${DAHUA_VTH_PORT:-5000}
       - DAHUA_VTH_USERNAME=${DAHUA_VTH_USERNAME:-user}
       - DAHUA_VTH_PASSWORD=${DAHUA_VTH_PASSWORD}
+      # Log every raw VTH event (doorbell diagnostics); set 0 to quiet
+      - DAHUA_EVENT_DEBUG=${DAHUA_EVENT_DEBUG:-1}
     labels:
       - "traefik.enable=true"
       - "traefik.http.services.intercom.loadbalancer.server.port=8000"

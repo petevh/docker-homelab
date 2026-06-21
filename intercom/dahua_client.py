@@ -52,6 +52,10 @@ STREAM_ROTATE = os.environ.get("STREAM_ROTATE", "") == "1"
 # the ~65s TTL. Tunable.
 RELAY_KEEPALIVE_SECS = float(os.environ.get("DAHUA_RELAY_KEEPALIVE", "40"))
 
+# Log every raw VTH event (Code/Action/CallID) — for diagnosing doorbell call
+# behaviour. Off by default; set DAHUA_EVENT_DEBUG=1 to enable.
+EVENT_DEBUG = os.environ.get("DAHUA_EVENT_DEBUG", "") == "1"
+
 CLIENT_UA = (
     "eyJjbGllbnRUeXBlIjoicGhvbmUiLCJjbGllbnRWZXJzaW9uIjoiVjIuNS4xMCIsImNsaWVu"
     "dE9WIjoiQW5kcm9pZCAxNiIsImNsaWVudE9TIjoiQW5kcm9pZCIsInRlcm1pbmFsTW9kZWwi"
@@ -1137,7 +1141,13 @@ def subscribe_events(
         last_ka       = time.time()
         KA_INTERVAL   = 15
         subscribe_utc: Optional[float] = None
-        seen_call_ids: set = set()
+        # CallID -> wall-clock time we last fired for it. The VTH cycles CallIDs
+        # (0..9) and reuses them, so a permanent "seen" set would wrongly drop a
+        # genuine new press that happens to reuse an old CallID. We only suppress a
+        # repeat CallID seen within RING_DEDUP_WINDOW (the same-instant event burst
+        # the VTH sometimes sends), not forever.
+        RING_DEDUP_WINDOW = 5.0
+        recent_call_ids: dict = {}
 
         while True:
             now = time.time()
@@ -1171,6 +1181,13 @@ def subscribe_events(
                 if subscribe_utc is None and event_utc > 0:
                     subscribe_utc = event_utc
 
+                # Optional raw-event trace (DAHUA_EVENT_DEBUG=1): logs every VTH
+                # event Code/Action so doorbell behaviour (e.g. which call type a
+                # real press emits, "Main VTO" vs internal calls) can be mapped.
+                if EVENT_DEBUG:
+                    log.info("EVT Code=%s Action=%s CallID=%s LocaleTime=%s",
+                             code, action, data.get("CallID", ""), data.get("LocaleTime", ""))
+
                 if code == "IgnoreInvite" and action == "Start":
                     real_utc   = float(data.get("RealUTC", 0))
                     call_id    = str(data.get("CallID", ""))
@@ -1180,9 +1197,10 @@ def subscribe_events(
                         continue  # replayed event
                     if subscribe_utc is not None and (subscribe_utc - real_utc) > 10:
                         continue  # stale event buffered by VTH
-                    if call_id in seen_call_ids:
-                        continue  # duplicate
-                    seen_call_ids.add(call_id)
+                    last_seen = recent_call_ids.get(call_id)
+                    if last_seen is not None and time.time() - last_seen < RING_DEDUP_WINDOW:
+                        continue  # same-instant duplicate burst — not a new press
+                    recent_call_ids[call_id] = time.time()
 
                     log.info("RING! CallID=%s  %s", call_id, local_time)
                     on_ring(call_id, local_time)
