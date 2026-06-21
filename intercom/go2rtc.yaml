@@ -31,6 +31,12 @@ webrtc:
 
 api:
   listen: ":1984"   # go2rtc API + web UI (the card connects here)
+  # Allow cross-origin WebSocket from the HA dashboard. The Advanced Camera Card
+  # connects to go2rtc over a WebSocket from https://ha.app.vanheerden.ch; without
+  # this, go2rtc rejects it ("request origin not allowed by Upgrader.CheckOrigin")
+  # and the card shows "Waiting for live stream to load". (The webrtc-camera card on
+  # the Live tab uses a different path and isn't affected.)
+  origin: "*"
 
 rtsp:
   listen: ":8553"   # go2rtc's own RTSP (avoid clashing with intercom's 8554)

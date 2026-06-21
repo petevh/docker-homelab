@@ -664,6 +664,13 @@ class StreamProxy:
         self._viewers      = 0
         self._idle_since: Optional[float] = None
         self._idle_grace   = 30.0          # seconds to linger after last viewer
+        # Safety net against a LEAKED viewer counter (a client that disconnects
+        # uncleanly and never runs release_viewer): track the last time there was
+        # REAL consumption (a mediamtx reader, or a /frame touch). If none for
+        # _hard_idle_grace, stop the relay even if _viewers is stuck > 0 — so a leak
+        # can't pin a cloud relay open indefinitely.
+        self._last_activity = time.time()
+        self._hard_idle_grace = 60.0
         self._relay_running = False        # is the cloud relay loop active now
         self._loop_thread: Optional[threading.Thread] = None  # the active _run_loop
 
@@ -683,6 +690,7 @@ class StreamProxy:
         with self._lock:
             self._viewers += 1
             self._idle_since = None
+            self._last_activity = time.time()
         self._ensure_relay()
 
     def release_viewer(self):
@@ -697,6 +705,7 @@ class StreamProxy:
         between fetches and stops it ~grace seconds after the player goes away."""
         with self._lock:
             self._idle_since = time.time()  # reset grace from now
+            self._last_activity = time.time()
         self._ensure_relay()
 
     def _ensure_relay(self):
@@ -746,6 +755,18 @@ class StreamProxy:
                 idle = False
                 with self._lock:
                     self._idle_since = time.time()   # reset grace; readers present
+                    self._last_activity = time.time()
+            # SAFETY NET: if the relay is up but there's been NO real consumption
+            # (no mediamtx readers, no recent touch) for _hard_idle_grace, stop it even
+            # if _viewers is stuck > 0 (a leaked /stream viewer from an unclean
+            # disconnect). The reader count is the ground truth for actual viewing.
+            if self._relay_running and not idle:
+                if self._mediamtx_readers() > 0:
+                    self._last_activity = time.time()
+                elif time.time() - self._last_activity > self._hard_idle_grace:
+                    log.info("Relay has no readers for %.0fs — stopping (viewer-leak safety net)",
+                             self._hard_idle_grace)
+                    idle = True
             with self._lock:
                 # a viewer is active/recent but the relay isn't running and the old
                 # loop has finished tearing down → (re)start it
@@ -758,6 +779,14 @@ class StreamProxy:
                 self._relay_running = False     # _run_loop checks this and exits
             elif wants_relay:
                 self._ensure_relay()
+
+    def mark_active(self):
+        """Heartbeat: an app-level consumer (e.g. a live /stream MJPEG viewer that
+        doesn't appear as a mediamtx reader) is actively pulling. Keeps the viewer-leak
+        safety net from stopping the relay while genuinely watched. A LEAKED viewer
+        stops calling this → activity goes stale → safety net fires."""
+        with self._lock:
+            self._last_activity = time.time()
 
     def get_frame(self) -> bytes:
         with self._lock:

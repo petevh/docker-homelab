@@ -506,7 +506,7 @@ def frame(auth=Depends(verify_api_key)):
 
 
 @app.get("/stream")
-def stream(auth=Depends(verify_api_key)):
+async def stream(request: Request, auth=Depends(verify_api_key)):
     """
     MJPEG multipart stream from VTO camera.
     Use as HA stream_source or open directly in a browser/VLC.
@@ -514,11 +514,18 @@ def stream(auth=Depends(verify_api_key)):
     if not _stream_proxy:
         raise HTTPException(status_code=503, detail="Stream proxy not configured")
 
-    def generate():
+    async def generate():
         _stream_proxy.acquire_viewer()   # on-demand: start relay while watched
         last_frame = b""
         try:
             while True:
+                # Detect client disconnect (incl. UNCLEAN: tab crash, network drop).
+                # Without this, a sync MJPEG loop can hang in the sleep below and never
+                # hit finally → acquire_viewer leaks → relay never idles. is_disconnected
+                # makes the release reliable.
+                if await request.is_disconnected():
+                    break
+                _stream_proxy.mark_active()   # this viewer is alive (safety-net heartbeat)
                 jpeg = _stream_proxy.get_frame()
                 if jpeg and jpeg != last_frame:
                     last_frame = jpeg
@@ -529,7 +536,7 @@ def stream(auth=Depends(verify_api_key)):
                     )
                     yield header + jpeg
                 else:
-                    time.sleep(0.05)
+                    await asyncio.sleep(0.05)
         finally:
             _stream_proxy.release_viewer()
 
