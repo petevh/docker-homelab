@@ -917,8 +917,13 @@ class StreamProxy:
 
         if not STREAM_ROTATE:
             # Keepalive holds this one session; feed until viewer leaves or it truly dies.
+            # MUST check _relay_running too: the keepalive thread keeps the session (and
+            # thus ffmpeg) alive indefinitely, so proc.poll() never returns and there's no
+            # natural break. When the supervisor drops the last viewer it sets
+            # _relay_running=False — without this check the feed loops forever and the
+            # cloud relay is never released (the viewer-leak that pinned ffmpeg open).
             try:
-                while self._running and proc.poll() is None:
+                while self._running and self._relay_running and proc.poll() is None:
                     data = active.read(timeout=0.5)
                     if data is None:
                         if active.dead:
