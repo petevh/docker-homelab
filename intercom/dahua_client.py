@@ -38,6 +38,13 @@ SVN_OPEN_VTH_DOOR = "222387"
 SVN_LOGIN         = "228782"
 
 RELAY_TTL = 62  # relay hard-closes at ~66s (KeepLive-Time 60 + grace); use the full window
+# Rotate relay sessions at the ~65s TTL by minting a fresh token+session (the old
+# default). DISABLED by default 2026-06-21: it re-mints every ~65s = ~20x more cloud
+# calls than DMSS (which keeps ONE session alive by re-sending the same PLAY/token every
+# ~40s — see memory dahua-relay-keepalive-SOLVED). Over-minting contributed to the account
+# flag. With rotation OFF, a stream just runs ~65s then DROPS (no re-mint). The proper fix
+# is the keepalive (planned), after which this stays off for good. STREAM_ROTATE=1 restores.
+STREAM_ROTATE = os.environ.get("STREAM_ROTATE", "") == "1"
 
 CLIENT_UA = (
     "eyJjbGllbnRUeXBlIjoicGhvbmUiLCJjbGllbnRWZXJzaW9uIjoiVjIuNS4xMCIsImNsaWVu"
@@ -774,6 +781,14 @@ class StreamProxy:
                     try:
                         self._feed_one_relay_session(proc)
                         _block_wait = 30
+                        # Rotation disabled: after the single session ends (~65s TTL)
+                        # do NOT re-open another (that would be a fresh cloud token
+                        # mint). Stop the relay so the stream just drops. Re-enable
+                        # with STREAM_ROTATE=1 / once keepalive lands.
+                        if not STREAM_ROTATE:
+                            log.info("Stream ended (no rotation) — stopping relay")
+                            self._relay_running = False
+                            break
                     except Exception as e:
                         # Cloud "IP in Block List" (code 10005): hammering makes it
                         # worse. Back off hard (30s→up to 10min) so the block clears.
@@ -820,11 +835,40 @@ class StreamProxy:
         hard-closes each connection at ~66s, so we pre-warm the next session a few
         seconds early (connected + keyframe-aligned, but discarding data). At switch
         time we release it so it emits fresh from its NEXT keyframe — a clean GOP
-        boundary — and stop the old one. No starvation gap, no stale-backlog dump."""
-        PREWARM_LEAD = 6     # pre-warm the next session this many seconds before TTL
+        boundary — and stop the old one. No starvation gap, no stale-backlog dump.
+
+        ROTATION DISABLED (2026-06-21): pre-warming a NEW relay session every ~65s
+        means a fresh cloud token-mint every minute — ~20x more cloud calls than DMSS,
+        which holds ONE session by re-sending the same PLAY (same token) every ~40s.
+        That over-minting is a big part of why the account got flagged. Until the
+        proper keepalive is implemented (see memory dahua-relay-keepalive-SOLVED), we
+        do NOT rotate: feed the single session until the relay drops it at ~65s, then
+        the session simply ENDS (no re-mint). Re-enable rotation with STREAM_ROTATE=1
+        only if needed. The real fix is keepalive, not rotation."""
         active = self._open_relay_session()
         active.release()     # active emits immediately
         log.info("Relay session connected (feeding persistent ffmpeg)")
+
+        if not STREAM_ROTATE:
+            # No rotation: feed this one session until it dies (~65s TTL), then return.
+            try:
+                while self._running and proc.poll() is None:
+                    data = active.read(timeout=0.5)
+                    if data is None:
+                        if active.dead:
+                            log.info("Relay session ended (~65s TTL; rotation disabled)")
+                            break
+                        continue
+                    try:
+                        proc.stdin.write(data)
+                        proc.stdin.flush()
+                    except BrokenPipeError:
+                        break
+            finally:
+                active.stop()
+            return
+
+        PREWARM_LEAD = 6     # pre-warm the next session this many seconds before TTL
         nxt = None
         start_t = time.time()
         try:
