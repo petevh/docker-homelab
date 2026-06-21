@@ -26,6 +26,7 @@ Home Assistant config:
 
 import asyncio
 import os
+import json
 import logging
 import threading
 import time
@@ -438,12 +439,25 @@ def hls_js():
 def talk_ui():
     """Duplex talk web page: live camera + mic (push to /talk/ws) + unlock.
     Open on a phone (mic needs the page; HA dashboards can't capture mic).
-    Pass ?key=<api-key>. HA 'Talk' button links here."""
+
+    The page's API calls (/frame, /talk/ws) need an API key. To keep the key
+    OUT of links/dashboards (the page is already gated by the Traefik IP-allowlist
+    — you must be on Tailscale/LAN to reach it), the server INJECTS the key into
+    the HTML from INTERCOM_API_KEY. So the dashboard link can be keyless
+    (/talk-ui). A ?key= in the URL still overrides (backward compatible)."""
     try:
         with open("/app/talk_ui.html", "r") as f:
-            return HTMLResponse(f.read())
+            html = f.read()
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="talk_ui.html not found")
+    injected = os.environ.get("INTERCOM_API_KEY", "")
+    # The page reads ?key= first, then falls back to window.__INJECTED_KEY__.
+    html = html.replace(
+        "</head>",
+        f'<script>window.__INJECTED_KEY__={json.dumps(injected)};</script></head>',
+        1,
+    )
+    return HTMLResponse(html)
 
 
 @app.post("/unlock", response_model=UnlockResponse)

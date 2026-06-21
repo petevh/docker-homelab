@@ -14,6 +14,9 @@ services:
       # API auth — named, individually-revocable keys ("label:key,...")
       - DAHUA_API_KEYS=${DAHUA_API_KEYS:-}
       - DAHUA_API_KEY=${DAHUA_API_KEY:-}   # legacy single key (optional fallback)
+      # Key the server injects into /talk-ui so the page works keyless (no ?key=
+      # in the dashboard link). Must be one of the keys in DAHUA_API_KEYS.
+      - INTERCOM_API_KEY=${INTERCOM_API_KEY}
       # Cloud API (unlock + stream)
       - DAHUA_ACCOUNT=${DAHUA_ACCOUNT:-}
       - DAHUA_ACCOUNT_PASSWORD=${DAHUA_ACCOUNT_PASSWORD:-}

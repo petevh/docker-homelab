@@ -60,7 +60,7 @@
   <button id="unlock"><span class="icon">🔓</span>Unlock</button>
 </div>
 <script>
-const KEY = new URLSearchParams(location.search).get('key') || '';
+const KEY = new URLSearchParams(location.search).get('key') || window.__INJECTED_KEY__ || '';
 const $ = id => document.getElementById(id);
 let _log=[];
 const status = m => { _log.push(m); $('status').textContent = _log.slice(-4).join(' | '); console.log('[talk]',m); };
