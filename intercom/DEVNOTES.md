@@ -17,7 +17,7 @@ analysis is in `DahuaConsole/NEXT_STEPS.md` — read it before touching this ser
 | HA WebRTC Camera card | **Working (verified 2026-06-21)** | Video + door audio + mic→door (open-mic). Sub-second talkback |
 | HA Advanced Camera Card | **Working (verified 2026-06-21)** | Same backend; explicit hold-to-talk mic button. Sub-second talkback |
 | HA two-way audio via `/talk-ui` | **Working** | Standalone web page (no HA client needed). ~2s talkback latency (non-WebRTC path) |
-| Doorbell → HA notification | **Working** | press → `IgnoreInvite` → webhook → HA fires same second. Phone-side delivery via FCM (see notes) |
+| Doorbell → HA notification | **Works, but LATE by design** | We trigger on `IgnoreInvite` = the call ENDING, so HA gets a "missed call" notification (arrives after ringing stops), not "ringing now". This VTH emits NO call-START event on the DHIP channel — instant notify needs a different source (likely SIP INVITE). See session notes |
 
 See **"Session 2026-06-21"** at the bottom for the keepalive/leak fixes, the HA card
 verification, and the doorbell-notification investigation.
@@ -339,30 +339,41 @@ WhatsApp). The mixer design (below) addresses this.
 event stream on TCP/5000) sees `IgnoreInvite+Start` → `on_ring` → fire-and-forget webhook
 POST to HA → HA automation (`Front door ring`) fires → `notify` to phone via FCM.
 
-**Findings (all measured on a common UTC clock):**
-- **Detection is instant.** Container logs `RING!` and HA's automation flips
-  `front_door_ringing` in the **same second**. No latency in the container or HA.
-- **DMSS vs us:** DMSS detects the ring within a few seconds of us (lined up via the VTH
-  call-log times once clock-corrected) — our pipeline is NOT the bottleneck.
+**★ THE KEY FINDING (corrected 2026-06-21): we notify on `IgnoreInvite` = the call ENDING,
+not the call STARTING. So HA gets a "MISSED CALL" notification, not a "ringing now" one.**
+`IgnoreInvite` is the VTH signalling the incoming call invite was ignored/ended (the ring
+went unanswered) — NOT the button press. User observed in real life: the HA notification
+only arrives AFTER the doorbell stops ringing. That is the symptom, and it is by design of
+which event we trigger on. (This SUPERSEDES the earlier wrong "detection is instant" and
+"phone-side FCM contention" theories — detection was instant *relative to IgnoreInvite*,
+but IgnoreInvite itself lags the press by the ring duration. The phone was never the bottleneck.)
+
+**What the event stream actually contains (DAHUA_EVENT_DEBUG=1, full log surveyed):**
+- The ONLY call-related events this VTH emits over `eventManager.attach` (codes:["All"]) are
+  `VideoTalkLog` (Pulse) and `IgnoreInvite` (Start) — they fire ~0.2s apart, BOTH at
+  call-end. There is **NO `Invite`/`CallStart`/`Call`-Start event delivered on this channel**
+  at press-time. So we cannot simply "trigger on the start event" — it isn't there.
+- A "ring burst" looks like: `VideoTalkLog` → `IgnoreInvite`(→RING!) → `sdSnapshot` (~3s
+  later), all clustered at the END of the call. Other steady traffic: `SIPRegisterResult`
+  Pulse every ~58s (SIP heartbeat), `DGSErrorReport` Pulse (noise).
+
+**=> To get an INSTANT "ringing now" notification we need a DIFFERENT event source than this
+DHIP subscription gives us.** The likely candidate is the SIP layer itself: the VTH speaks
+SIP (we see `SIPRegisterResult`), and the actual call is a SIP **INVITE** that we are NOT
+listening to. Listening for the INVITE (or a VTO-side event) would fire at press-time.
+NEXT INVESTIGATION (needs someone at the door to press + timestamp the actual press vs the
+events): does a SIP INVITE / VTO event arrive at press-moment? See memory
+`intercom-doorbell-missed-call-notification`.
+
+**Other findings (these stand):**
 - **The "62s" red herring:** the VTH's embedded `LocaleTime` string was ~62s slow AND on a
   different offset — comparing it to real time looked like a 62s delay. It wasn't; the
-  container's own clock matched HA exactly. (VTH later NTP'd to `pool.ntp.org`, which
-  fixed the drift but reset its timezone display to UTC — cosmetic, we use container UTC.)
+  container's own clock matched HA exactly. (VTH later NTP'd to `pool.ntp.org`, which fixed
+  the drift but reset its timezone display to UTC — cosmetic, we use container UTC.)
 - **CallID dedup bug found + fixed** (see Status table): the VTH cycles CallIDs 0–9 and
   reuses them; the old permanent `seen_call_ids` set silently dropped a genuine new press
-  that reused an old CallID. Now time-windowed (`RING_DEDUP_WINDOW`, 5s) — only suppresses
-  the same-instant duplicate burst.
-- **A real press emits a burst:** `AutoRegister`, `IgnoreInvite`, `sdLvMsgAndSnapshot`,
-  `sdReadFlag`, `sdSnapshot` (all same instant). We correctly pick `IgnoreInvite+Start`.
-  Set `DAHUA_EVENT_DEBUG=1` to log every raw event (left on for ongoing diagnostics).
-
-**Remaining (phone-side, not our pipeline):** HA's FCM notification can lag DMSS's instant
-ring. Suspected cause = **on-device contention**: DMSS receives the doorbell as a *call*
-(SIP/VoIP, full-screen-intent via "Appear on top") that **bypasses notification
-permissions** (it rang even after notifications were revoked + force-stop), and that
-screen-takeover preempts HA's FCM notification until it ends. Mitigation = stop DMSS
-handling the call (disable the app / revoke "Appear on top"). DMSS's dedicated push socket
-will always edge out FCM regardless. This is a phone-settings issue, not a code issue.
+  that reused an old CallID. Now time-windowed (`RING_DEDUP_WINDOW`, 5s).
+- `DAHUA_EVENT_DEBUG=1` left on for ongoing diagnostics.
 
 ### 5. Mixer design recorded (NOT built)
 The contention (multi-client / multi-mode / household) and the open-mic problem both point
