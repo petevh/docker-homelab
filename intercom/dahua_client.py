@@ -45,6 +45,12 @@ RELAY_TTL = 62  # relay hard-closes at ~66s (KeepLive-Time 60 + grace); use the 
 # flag. With rotation OFF, a stream just runs ~65s then DROPS (no re-mint). The proper fix
 # is the keepalive (planned), after which this stays off for good. STREAM_ROTATE=1 restores.
 STREAM_ROTATE = os.environ.get("STREAM_ROTATE", "") == "1"
+# Relay keepalive interval. DMSS holds ONE relay session indefinitely by re-sending the
+# SAME PLAY (same token) every ~40s on the held socket (decoded from a 23-min capture —
+# memory dahua-relay-keepalive-SOLVED). We do the same: one token, kept alive, instead of
+# re-minting every ~65s (~20x fewer cloud calls → far less flag-prone). 40s has margin to
+# the ~65s TTL. Tunable.
+RELAY_KEEPALIVE_SECS = float(os.environ.get("DAHUA_RELAY_KEEPALIVE", "40"))
 
 CLIENT_UA = (
     "eyJjbGllbnRUeXBlIjoicGhvbmUiLCJjbGllbnRWZXJzaW9uIjoiVjIuNS4xMCIsImNsaWVu"
@@ -490,19 +496,53 @@ class _RelaySession:
     consumer gets a clean keyframe-aligned DHAV byte stream. Used in pairs to overlap
     relay reconnects (pre-warm the next before the current expires)."""
 
-    def __init__(self, sock: socket.socket, running, held: bool = False):
+    def __init__(self, sock: socket.socket, running, held: bool = False,
+                 relay_url: str = ""):
         self._sock    = sock
         self._running = running          # callable -> bool (proxy still alive)
         self._q: "queue.Queue[bytes]" = queue.Queue(maxsize=256)
         self._stop    = False
         self._thread  = None
+        self._ka_thread = None           # keepalive thread (holds the session alive)
         self.dead     = False
         self._ready   = False            # True once connected + synced to a keyframe
         self._held    = held             # if True, discard data until release()
+        self._relay_url = relay_url      # host:port/path?token... — to rebuild keepalive PLAY
 
     def start(self):
         self._thread = threading.Thread(target=self._pull, daemon=True)
         self._thread.start()
+        # Keepalive: re-send the SAME PLAY (same token) on this socket every ~40s so
+        # the relay doesn't hard-close at ~65s. Mirrors DMSS → one token holds the
+        # session indefinitely (no per-65s re-mint). Only if we have the url.
+        if self._relay_url:
+            self._ka_thread = threading.Thread(target=self._keepalive, daemon=True)
+            self._ka_thread.start()
+
+    def _keepalive(self):
+        """Re-send PLAY ...&trackID=31&method=0 (original token) every RELAY_KEEPALIVE_SECS
+        on the SAME socket, so the relay keeps this session alive past the ~65s TTL.
+        The media flows DOWN this socket; the keepalive PLAY goes UP it (TCP duplex)."""
+        host_port, path = self._relay_url.split("/", 1)
+        host, port = host_port.rsplit(":", 1)
+        sep = "&" if "?" in path else "?"
+        cseq = 1
+        # send the first keepalive ~LEAD seconds before the TTL, then every interval
+        while self._running() and not self._stop:
+            # sleep in small steps so stop() is responsive
+            slept = 0.0
+            while slept < RELAY_KEEPALIVE_SECS and self._running() and not self._stop:
+                time.sleep(0.5); slept += 0.5
+            if self._stop or not self._running():
+                break
+            req = (f"PLAY /{path}{sep}trackID=31&method=0 HTTP/1.1\r\n"
+                   f"Host: {host}:{port}\r\nAccpet-Sdp: Private\r\n"
+                   f"Connection: keep-alive\r\nCseq: {cseq}\r\n\r\n")
+            try:
+                self._sock.sendall(req.encode())
+                cseq += 1
+            except OSError:
+                break   # socket gone; _pull will mark dead
 
     def is_ready(self) -> bool:
         """True once connected and synced to its first keyframe (safe to switch to)."""
@@ -779,16 +819,14 @@ class StreamProxy:
                 _block_wait = 30
                 while self._running and self._relay_running and proc.poll() is None:
                     try:
+                        # ONE relay session, held alive by its keepalive thread
+                        # (re-sends the same PLAY/token every ~40s). It returns only
+                        # when the viewer leaves OR the session GENUINELY dies (keepalive
+                        # rejected / token truly expired) — the latter is rare, so this
+                        # re-mints only at real expiry, not every ~65s. That's the whole
+                        # point: ~1 token mint per long viewing session, like DMSS.
                         self._feed_one_relay_session(proc)
                         _block_wait = 30
-                        # Rotation disabled: after the single session ends (~65s TTL)
-                        # do NOT re-open another (that would be a fresh cloud token
-                        # mint). Stop the relay so the stream just drops. Re-enable
-                        # with STREAM_ROTATE=1 / once keepalive lands.
-                        if not STREAM_ROTATE:
-                            log.info("Stream ended (no rotation) — stopping relay")
-                            self._relay_running = False
-                            break
                     except Exception as e:
                         # Cloud "IP in Block List" (code 10005): hammering makes it
                         # worse. Back off hard (30s→up to 10min) so the block clears.
@@ -826,7 +864,8 @@ class StreamProxy:
                                     self.device_sn, self.channel, self.stream))
         sock = connect_relay(relay_url)
         sock.settimeout(10)
-        sess = _RelaySession(sock, lambda: self._running, held=held)
+        sess = _RelaySession(sock, lambda: self._running, held=held,
+                             relay_url=relay_url)
         sess.start()
         return sess
 
@@ -837,26 +876,24 @@ class StreamProxy:
         time we release it so it emits fresh from its NEXT keyframe — a clean GOP
         boundary — and stop the old one. No starvation gap, no stale-backlog dump.
 
-        ROTATION DISABLED (2026-06-21): pre-warming a NEW relay session every ~65s
-        means a fresh cloud token-mint every minute — ~20x more cloud calls than DMSS,
-        which holds ONE session by re-sending the same PLAY (same token) every ~40s.
-        That over-minting is a big part of why the account got flagged. Until the
-        proper keepalive is implemented (see memory dahua-relay-keepalive-SOLVED), we
-        do NOT rotate: feed the single session until the relay drops it at ~65s, then
-        the session simply ENDS (no re-mint). Re-enable rotation with STREAM_ROTATE=1
-        only if needed. The real fix is keepalive, not rotation."""
+        KEEPALIVE MODE (default, STREAM_ROTATE off): one relay session, held alive by
+        its keepalive thread (re-sends the same PLAY/token every ~40s — DMSS's mechanism,
+        memory dahua-relay-keepalive-SOLVED). Feed it until the viewer leaves or it
+        GENUINELY dies (keepalive rejected / token truly expired — rare). ~1 token mint
+        per viewing session instead of ~20x. STREAM_ROTATE=1 restores the old per-65s
+        pre-warm rotation if ever needed."""
         active = self._open_relay_session()
         active.release()     # active emits immediately
         log.info("Relay session connected (feeding persistent ffmpeg)")
 
         if not STREAM_ROTATE:
-            # No rotation: feed this one session until it dies (~65s TTL), then return.
+            # Keepalive holds this one session; feed until viewer leaves or it truly dies.
             try:
                 while self._running and proc.poll() is None:
                     data = active.read(timeout=0.5)
                     if data is None:
                         if active.dead:
-                            log.info("Relay session ended (~65s TTL; rotation disabled)")
+                            log.info("Relay session ended (keepalive stopped / token expired)")
                             break
                         continue
                     try:
