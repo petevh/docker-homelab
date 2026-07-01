@@ -11,6 +11,10 @@ services:
       - traefik
       - intercom-internal   # shared with go2rtc (it reaches intercom:8000/8554)
     environment:
+      # Local time for logs (host + HA are Asia/Dubai; container defaulted to UTC,
+      # which made cross-component timestamp comparison confusing). NB: historical
+      # DEVNOTES/memory timestamps are labelled UTC and remain valid.
+      - TZ=Asia/Dubai
       # API auth — named, individually-revocable keys ("label:key,...")
       - DAHUA_API_KEYS=${DAHUA_API_KEYS:-}
       - DAHUA_API_KEY=${DAHUA_API_KEY:-}   # legacy single key (optional fallback)
@@ -97,6 +101,7 @@ services:
       - "8555:8555/tcp"    # WebRTC media (TCP)
       - "8555:8555/udp"    # WebRTC media (UDP)
     environment:
+      - TZ=Asia/Dubai
       # Intercom API key (the 'ha' label value) for the exec backchannel POST to
       # /talk/stream. From .env — NOT committed.
       - INTERCOM_API_KEY=${INTERCOM_API_KEY}
