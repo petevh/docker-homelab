@@ -278,6 +278,27 @@ function stopTalk(fromClose){
 }
 // toggle talk (tap to start, tap to stop — duplex stays open while on)
 $('talk').onclick = () => { talking ? stopTalk(false) : startTalk(); };
+
+// ---- Force-release the mic when the page goes away ----
+// stopTalk() releases the mic tracks + AudioContext, which is what frees the
+// Bluetooth SCO (call-audio) link on the phone. But it only runs on an explicit
+// Talk-off tap. If you lock the phone, switch apps, or close the tab WHILE
+// talking, the mic tracks are never stopped → the browser keeps SCO claimed and
+// your earbuds become unusable for calls until you reboot. Tear everything down
+// on pagehide and when the tab is hidden so the mic is always released.
+function releaseAll(){
+  try{ if(talking) stopTalk(true); }catch(e){}
+  // also drop the WebRTC downlink (it holds an audio session too)
+  try{ teardownPc(); }catch(e){}
+  try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch(e){}
+  try{ if(audioCtx){ audioCtx.close(); audioCtx=null; } }catch(e){}
+}
+// pagehide fires on tab close / navigation / bfcache (more reliable than unload)
+window.addEventListener('pagehide', releaseAll);
+// visibilitychange covers app-switch / phone-lock, where pagehide may not fire
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState==='hidden' && talking){ stopTalk(true); }
+});
 </script>
 </body>
 </html>
