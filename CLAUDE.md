@@ -37,6 +37,9 @@ docker-homelab/
 ├── actual/
 │   ├── docker-compose.yml
 │   └── .env.example
+├── intuneget/                   # Intune Winget packaging — builds from an out-of-repo clone
+│   ├── docker-compose.yml       #   (build context ../../IntuneGet, NOT tracked here)
+│   └── .env.example
 ├── paperless/                   # Planned — document management
 │   ├── docker-compose.yml
 │   └── .env.example
@@ -56,6 +59,7 @@ Docker network: traefik (internal bridge)
     ├── n8n          (n8n.app.vanheerden.ch)
     ├── portainer    (portainer.app.vanheerden.ch)
     ├── actual       (actual.app.vanheerden.ch)
+    ├── intuneget    (intuneget.app.vanheerden.ch)
     └── paperless    (paperless.app.vanheerden.ch) [planned]
 
 File provider (non-Docker upstreams via config/dynamic/)
@@ -111,6 +115,22 @@ labels:
 - **Role:** Personal finance / budgeting
 - **URL:** `actual.app.vanheerden.ch`
 - **Note:** No webhook/callback URLs — no HOST/PROTOCOL env vars needed
+
+### IntuneGet
+- **Role:** Self-hosted [IntuneGet](https://github.com/ugurkocde/IntuneGet) — browse the Winget catalog and generate/upload `.intunewin` packages to Intune, without giving the public `intuneget.com` any M365 credentials. Single-user (Pete only); targets the **Kemyion** tenant.
+- **URL:** `intuneget.app.vanheerden.ch`
+- **Build context is OUT of this repo:** builds from a pinned clone at `/mnt/development/IntuneGet` (`git clone ugurkocde/IntuneGet`) — there is no published image. The image only updates when you rebuild after pulling that clone:
+  ```
+  git -C /mnt/development/IntuneGet fetch --tags && git -C /mnt/development/IntuneGet checkout <tag>
+  cd /mnt/development/docker-homelab/intuneget && docker compose build && docker compose up -d
+  ```
+- **Two-switch Supabase trap:** the app must run in local mode. The catalog source is chosen by `isSupabaseConfigured()` (presence of `NEXT_PUBLIC_SUPABASE_*`), **not** by `DATABASE_MODE`. Both must agree: `DATABASE_MODE=sqlite` **and** no `NEXT_PUBLIC_SUPABASE_*` anywhere (including `.env`, since `env_file` passes the whole file through). Leaving a Supabase URL set silently re-enables the hosted catalog and remote token storage.
+- **Key env vars:**
+  - `AZURE_CLIENT_ID` — injected at runtime by the server (the `NEXT_PUBLIC_*` client-ID var is inlined empty at build time, so this plain name is the one that matters)
+  - `AZURE_AD_CLIENT_SECRET` — Entra client secret (single-tenant app registered in Kemyion)
+  - `PACKAGER_MODE=local`, `PACKAGER_API_KEY` — shared secret with the Windows packager
+- **Windows packager dependency:** actual `.intunewin` packaging + upload runs on a separate Windows VM (`@intuneget/packager`), which polls this web app outbound using `PACKAGER_API_KEY`. Set up after the web app is confirmed healthy.
+- **Data:** named volume `intuneget_data:/data` holds both `intuneget.db` and the downloaded catalog snapshot.
 
 ### Home Assistant
 - **Role:** Home automation

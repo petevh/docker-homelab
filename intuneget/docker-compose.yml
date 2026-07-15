@@ -1,0 +1,56 @@
+services:
+  intuneget:
+    build:
+      context: ../../IntuneGet        # = /mnt/development/IntuneGet (upstream clone, NOT tracked here)
+      dockerfile: Dockerfile          # no published image — build from source is mandatory
+    container_name: intuneget
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      - TZ=Asia/Dubai
+      # Local-only: packaging jobs + upload history stay in SQLite on the named volume
+      - DATABASE_MODE=sqlite
+      - DATABASE_PATH=/data/intuneget.db
+      - PACKAGER_MODE=local           # upstream default is "github"; must override
+      - PACKAGER_API_KEY=${PACKAGER_API_KEY}
+      # Client ID: the NEXT_PUBLIC_* var is inlined empty at build time; the server injects
+      # AZURE_CLIENT_ID at runtime via window.__RUNTIME_CONFIG__ (app/layout.tsx). Set THIS name.
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_AD_CLIENT_SECRET=${AZURE_AD_CLIENT_SECRET}
+      - NEXT_PUBLIC_URL=https://intuneget.app.vanheerden.ch
+      # DELIBERATELY ABSENT: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
+      # The catalog source is chosen by isSupabaseConfigured() (lib/catalog/index.ts), NOT by
+      # DATABASE_MODE. Their absence is what routes the catalog to the public snapshot and keeps
+      # tokens off Supabase. Do NOT add them to .env either — env_file passes the whole file through.
+
+    volumes:
+      - intuneget_data:/data          # holds intuneget.db AND the unpacked catalog snapshot
+
+    healthcheck:
+      # node is the container entrypoint (guaranteed present). Avoids busybox `wget --spider`,
+      # whose flag support on node:alpine is unreliable. 200 => healthy/degraded, non-200 => down.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.intuneget.rule=Host(`intuneget.app.vanheerden.ch`)"
+      - "traefik.http.routers.intuneget.entrypoints=websecure"
+      - "traefik.http.routers.intuneget.tls.certresolver=cloudflare"
+      - "traefik.http.services.intuneget.loadbalancer.server.port=3000"
+
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
+
+volumes:
+  intuneget_data:
