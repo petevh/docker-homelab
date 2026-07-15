@@ -6,6 +6,12 @@ services:
     container_name: intuneget
     restart: unless-stopped
 
+    # Upstream's Dockerfile switches to USER nextjs (1001:65533) but never creates /data,
+    # so Docker makes the named-volume mountpoint root-owned and the app can't write its
+    # SQLite DB or the catalog snapshot. Naming the uid:gid here makes Docker chown the
+    # mountpoint to match. Keep in sync with the Dockerfile's nextjs user if it ever changes.
+    user: "1001:65533"
+
     env_file:
       - .env
 
