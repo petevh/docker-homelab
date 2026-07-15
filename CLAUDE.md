@@ -125,7 +125,10 @@ labels:
   cd /mnt/development/docker-homelab/intuneget && docker compose build && docker compose up -d
   ```
 - **Two-switch Supabase trap:** the app must run in local mode. The catalog source is chosen by `isSupabaseConfigured()` (presence of `NEXT_PUBLIC_SUPABASE_*`), **not** by `DATABASE_MODE`. Both must agree: `DATABASE_MODE=sqlite` **and** no `NEXT_PUBLIC_SUPABASE_*` anywhere (including `.env`, since `env_file` passes the whole file through). Leaving a Supabase URL set silently re-enables the hosted catalog and remote token storage.
-- **Entra redirect URI must end in `/redirect`:** `https://intuneget.app.vanheerden.ch/redirect` (SPA type). MSAL hardcodes `${window.location.origin}/redirect` (`lib/msal-config.ts`) and the app serves `app/redirect/page.tsx` to receive it. Upstream's `.env.example` says to register the bare domain — that is **wrong** and sign-in fails with a redirect-mismatch.
+- **Entra redirect URIs — TWO are required** (upstream's `.env.example` says to register the bare domain; that is **wrong** and sign-in fails with a redirect-mismatch):
+  - `https://intuneget.app.vanheerden.ch/redirect` — **SPA** type. MSAL sign-in; hardcoded as `${window.location.origin}/redirect` (`lib/msal-config.ts`), received by `app/redirect/page.tsx`.
+  - `https://intuneget.app.vanheerden.ch/auth/consent-callback` — admin-consent return; hardcoded in `getAdminConsentUrl()` (`lib/msal-config.ts`) + `lib/onboarding-utils.ts`, received by `app/auth/consent-callback/page.tsx`. A plain browser redirect from Microsoft, so it belongs under the **Web** platform (SPA may also work — move it to Web if consent errors with a mismatch).
+  - Do **not** add `/api/msp/tenants/consent-callback` — that's the MSP multi-customer flow, unused here.
 - **Key env vars:**
   - `AZURE_CLIENT_ID` — injected at runtime by the server (the `NEXT_PUBLIC_*` client-ID var is inlined empty at build time, so this plain name is the one that matters)
   - `AZURE_AD_CLIENT_SECRET` — Entra client secret (single-tenant app registered in Kemyion)
