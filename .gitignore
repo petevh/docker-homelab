@@ -19,3 +19,6 @@ n8n/private-config.json
 *.save
 *.bak
 *.backup
+
+# Catalog refresh logs (cron output — see intuneget/scripts/refresh-catalog.sh)
+intuneget/logs/
