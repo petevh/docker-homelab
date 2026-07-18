@@ -56,7 +56,7 @@ packaging cadence, not a guessed one. Polling (not webhooks) is correct either w
 the packager reaches *out*, so no inbound ports; see the network reasoning in the
 session that produced this.
 
-### Build tool — leaning IntuneWin32App, not decided
+### Build tool — IntuneWin32App (scoped; upload-half decision open)
 
 [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) (MSEndpointMgr) is
 the community-standard PowerShell module. It packages the **raw installer** and lets
@@ -71,6 +71,46 @@ the raw path is simpler and drops the custom pipeline entirely.
 (`intune-uploader.ts`) — five Graph-payload bugs, on the fork branch. Reusing your
 own known-good upload code may now beat adopting the module. This changed the moment
 that fix landed. Weigh "reuse fixed fork code" vs. "adopt mature module" when building.
+
+### Integration plan (branch `feat/packager-intunewin32app` on the fork)
+
+Branched off `fix/packager-win32lobapp-create-payload` (NOT upstream) so the fixed
+upload code is on hand to reuse. The existing packager
+(`@ugurkocde/intuneget-packager`, a **TypeScript** CLI) already orchestrates the whole
+pipeline in `packager/src/job-processor.ts::processJob`:
+
+```
+download installer → verify checksum → createPsadtPackage → IntuneWinAppUtil.exe
+  → .intunewin → uploader.uploadToIntune (the fixed intune-uploader.ts)
+```
+
+IntuneWin32App reshapes the middle. Mapping onto the real steps:
+
+- **Drop `createPsadtPackage`.** This is the PSADT wrap IntuneWin32App exists to avoid.
+  The install command becomes the raw installer + silent switch — which is exactly the
+  **silent-args gap (§3)**: this branch is where that `installer_type → default switch`
+  fallback has to live.
+- **`IntuneWinAppUtil.exe` step** → IntuneWin32App's `New-IntuneWin32AppPackage` (it
+  wraps the same Microsoft util). Marginal on its own; the value is it pairs with the
+  next point.
+- **Upload — the open decision, made concrete here.** IntuneWin32App's
+  `Add-IntuneWin32App` would *replace* `uploader.uploadToIntune`. But that's the fixed
+  code. So the real fork in the road:
+  - **(a) module for build only, keep the fixed uploader** — smallest change, keeps
+    your known-good Graph payload, drops just PSADT. Lowest risk.
+  - **(b) module for build + upload** — adopt `Add-IntuneWin32App`, retire
+    `intune-uploader.ts`. More mature, but re-opens the payload surface you just fixed.
+  Lean **(a)** unless the module's upload proves clearly better in practice.
+
+**Language seam:** packager is TypeScript, IntuneWin32App is PowerShell. `job-processor`
+already `spawn`s child processes (it shells out to `IntuneWinAppUtil.exe`), so the
+integration is a `spawn` to `pwsh` running a small script — not a rewrite. The packager
+runs on the **Windows** side (per §2's build/upload split), where `pwsh` + the module
+are available.
+
+**Open before coding:** (1) is `pwsh` + IntuneWin32App provisioned on the Windows
+packager host? (2) confirm the module's detection-rule handling matches what the web app
+sends per job; (3) decide (a) vs (b) above — default (a).
 
 ---
 
@@ -200,7 +240,8 @@ question than the one that mattered. Checking, not trusting, was correct every t
 | State | Item |
 |---|---|
 | **Done** | Web app live — catalog browsing, TLS via Traefik, MSAL sign-in verified, no Supabase, secret local. On `main`, pushed. |
-| **Done** | Packager payload fixed — five Graph-payload bugs, on the fork branch. Deploys succeed against a live tenant. |
+| **Done** | Packager payload fixed — five Graph-payload bugs, on fork branch `fix/packager-win32lobapp-create-payload` (PR'd upstream). Deploys succeed against a live tenant. |
+| **In progress** | Packager → IntuneWin32App — branch `feat/packager-intunewin32app` (off the fix branch) created + pushed; integration plan scoped in §2. No code yet. |
 | **Done** | `PACKAGER_API_KEY` in 1Password. |
 | **Done** | Snapshot override wired (§5 opt 3) — `CATALOG_SNAPSHOT_BASE_URL/_FILE/_DIR` documented in compose + `.env.example`. |
 | **Done (superseded)** | Prove-it: Chrome fixed via a hand-built catalog (`scripts/patch-catalog-chrome.mjs`). Now replaced by the full populator below, but the script stays as the minimal single-app fix pattern. `CATALOG_SNAPSHOT_FILE=/data/catalog.local.sqlite` (skips all snapshot networking); built by `scripts/patch-catalog-chrome.mjs` (clone frozen snapshot → bump Chrome to the live winget-pkgs version, real per-arch SHAs). Verified through the app: `/api/winget/search` and `/api/winget/manifest` both return `150.0.7871.129` with 3 installers. **Caveat:** the `.local.sqlite` lives on the (un-tracked) `/data` volume — re-run the script after a fresh volume, and when winget-pkgs rolls Chrome. This proves the override path; it is NOT the populator. |
