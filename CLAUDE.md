@@ -141,7 +141,7 @@ labels:
   ( crontab -l 2>/dev/null | grep -v refresh-catalog.sh; \
     echo "30 4 * * * /mnt/development/docker-homelab/intuneget/scripts/refresh-catalog.sh >> /mnt/development/docker-homelab/intuneget/logs/refresh-catalog.log 2>&1" ) | crontab -
   ```
-  Depends on the frozen curation base `/data/catalog.frozen.bak` (on the named volume, not in git); the script aborts loudly if it's missing (e.g. fresh volume — rebuild it from an upstream snapshot first). Logs: `intuneget/logs/refresh-catalog.log` (gitignored).
+  Depends on the frozen curation base `catalog.frozen.bak`. That base lives on the VM's **local** Docker volume (`/var/lib/docker/volumes/intuneget_intuneget_data/_data`), **not** the NAS — running compose from a NAS-mounted dir does not put the data volume on the NAS. So a durable copy is kept on the NAS at `intuneget/seed/catalog.frozen.bak` (gitignored — ~58MB binary; the ZFS-snapshotted NAS share is the store). If the volume's copy is gone (fresh/lost volume), `refresh-catalog.sh` **auto-restores it from the seed** before building; it only aborts if the seed is also missing. Logs: `intuneget/logs/refresh-catalog.log` (gitignored).
 
 ### Home Assistant
 - **Role:** Home automation

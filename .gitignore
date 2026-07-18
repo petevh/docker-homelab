@@ -22,3 +22,7 @@ n8n/private-config.json
 
 # Catalog refresh logs (cron output — see intuneget/scripts/refresh-catalog.sh)
 intuneget/logs/
+
+# Frozen curation base — durable NAS copy of the catalog seed (~58MB binary, ZFS-backed).
+# Too large/binary for git; the NAS share IS the durable store. See refresh-catalog.sh.
+intuneget/seed/

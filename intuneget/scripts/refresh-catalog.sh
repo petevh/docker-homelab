@@ -34,6 +34,19 @@ NEW="/data/catalog.new.sqlite"          # build target
 IDX_IN_CONTAINER="/data/idx.json"
 MIN_ROWS=10000                          # sanity floor: a healthy catalog is ~14k apps
 
+# Durable copy of the frozen curation base on the NAS share (ZFS, snapshotted). The base
+# lives on the VM's LOCAL docker volume (/var/lib/docker/...), NOT the NAS, so a volume
+# loss would otherwise destroy it. This seed lets the refresh self-heal after a fresh/lost
+# volume.
+#
+# Provenance: catalog.frozen.bak is byte-identical to upstream's published catalog-latest
+# release snapshot (manifest version 2026-07-10, the last upstream published). It is NOT
+# built from the IntuneGet source — the source can read a snapshot but not manufacture that
+# one (it's a render of upstream's Supabase). If this seed is ever lost, the ONLY other
+# source is re-downloading catalog.sqlite.gz from upstream's github catalog-latest release
+# IF it still exists. Hence keeping this NAS copy: it's the one artifact we can't regenerate.
+SEED="$REPO_DIR/seed/catalog.frozen.bak"
+
 log() { echo "[$(date -Is)] $*"; }
 die() { echo "[$(date -Is)] ERROR: $*" >&2; exit 1; }
 
@@ -43,9 +56,18 @@ docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
   || die "container '$CONTAINER' is not running"
 
 # The frozen curation base must exist inside the container, or we'd build a catalog with
-# no categories/icons and silently degrade browsing.
-docker exec "$CONTAINER" test -f "$FROZEN" \
-  || die "frozen curation base $FROZEN missing in container (fresh volume?). Aborting; live catalog untouched."
+# no categories/icons and silently degrade browsing. If the volume's copy is gone (fresh
+# volume, or someone removed it), restore it from the NAS seed before giving up.
+if ! docker exec "$CONTAINER" test -f "$FROZEN"; then
+  if [ -f "$SEED" ]; then
+    log "frozen base missing in volume; restoring from NAS seed $SEED"
+    docker cp "$SEED" "$CONTAINER:$FROZEN"
+    docker exec -u 0 "$CONTAINER" chmod a+r "$FROZEN"
+    docker exec "$CONTAINER" test -f "$FROZEN" || die "restore from seed failed"
+  else
+    die "frozen base $FROZEN missing in container AND no NAS seed at $SEED. Aborting; live catalog untouched."
+  fi
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; docker exec "$CONTAINER" rm -f "$IDX_IN_CONTAINER" 2>/dev/null || true' EXIT
