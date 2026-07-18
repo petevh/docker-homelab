@@ -40,11 +40,13 @@ MIN_ROWS=10000                          # sanity floor: a healthy catalog is ~14
 # volume.
 #
 # Provenance: catalog.frozen.bak is byte-identical to upstream's published catalog-latest
-# release snapshot (manifest version 2026-07-10, the last upstream published). It is NOT
-# built from the IntuneGet source — the source can read a snapshot but not manufacture that
-# one (it's a render of upstream's Supabase). If this seed is ever lost, the ONLY other
-# source is re-downloading catalog.sqlite.gz from upstream's github catalog-latest release
-# IF it still exists. Hence keeping this NAS copy: it's the one artifact we can't regenerate.
+# release ASSET (a GitHub release, not committed to git; manifest version 2026-07-10 —
+# stale, but upstream is active and the release is fine, we just don't control its refresh
+# cadence). It is NOT built from the IntuneGet source (the source reads a snapshot but
+# can't manufacture one — it's a render of upstream's Supabase). Recovery if this seed is
+# lost = re-download catalog.sqlite.gz + manifest.json from
+#   https://github.com/ugurkocde/IntuneGet/releases/download/catalog-latest/
+# and gunzip. The NAS seed just removes that external dependency from the recovery path.
 SEED="$REPO_DIR/seed/catalog.frozen.bak"
 
 log() { echo "[$(date -Is)] $*"; }
