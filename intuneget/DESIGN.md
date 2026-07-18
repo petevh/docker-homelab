@@ -194,6 +194,8 @@ question than the one that mattered. Checking, not trusting, was correct every t
 | **Done** | Web app live — catalog browsing, TLS via Traefik, MSAL sign-in verified, no Supabase, secret local. On `main`, pushed. |
 | **Done** | Packager payload fixed — five Graph-payload bugs, on the fork branch. Deploys succeed against a live tenant. |
 | **Done** | `PACKAGER_API_KEY` in 1Password. |
+| **Done** | Snapshot override wired (§5 opt 3) — `CATALOG_SNAPSHOT_BASE_URL/_FILE/_DIR` documented in compose + `.env.example`. |
+| **Done (prove-it)** | Chrome fixed via a hand-built catalog. `CATALOG_SNAPSHOT_FILE=/data/catalog.local.sqlite` (skips all snapshot networking); built by `scripts/patch-catalog-chrome.mjs` (clone frozen snapshot → bump Chrome to the live winget-pkgs version, real per-arch SHAs). Verified through the app: `/api/winget/search` and `/api/winget/manifest` both return `150.0.7871.129` with 3 installers. **Caveat:** the `.local.sqlite` lives on the (un-tracked) `/data` volume — re-run the script after a fresh volume, and when winget-pkgs rolls Chrome. This proves the override path; it is NOT the populator. |
 | **Open** | Packaging redesign — build on GitHub runner, upload in container, IntuneWin32App vs. fork's upload code (§2), plus silent-args fallback (§3). |
-| **Open** | Catalog sync — choose a populator (§5). This is what actually fixes Chrome; independent of packaging. |
+| **Open** | Catalog sync — choose a populator (§5). The prove-it above fixes only Chrome by hand; a populator refreshes the *whole* catalog on a schedule. **Correction:** packaging resolves the installer *live* from winget-pkgs (`getManifest`), so a stale catalog breaks an app only when its pinned version's winget-pkgs directory is deleted — bumping the catalog's version row (as the prove-it does) is enough to unstick it. |
 | **Open** | Windows execution — on-demand GitHub runner vs. wake-on-demand Proxmox VM. Decide on real cadence. |

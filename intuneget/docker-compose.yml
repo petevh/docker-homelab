@@ -44,8 +44,14 @@ services:
       #   CATALOG_SNAPSHOT_DIR      — where the downloaded/unpacked catalog.sqlite lives.
       #     Default = dirname(DATABASE_PATH) = /data (already on the named volume).
       # - CATALOG_SNAPSHOT_BASE_URL=${CATALOG_SNAPSHOT_BASE_URL}
-      # - CATALOG_SNAPSHOT_FILE=/data/catalog.sqlite
       # - CATALOG_SNAPSHOT_DIR=/data
+      # ACTIVE (DESIGN.md §5 prove-it): a hand-built catalog that fixes Chrome — upstream's
+      # frozen snapshot pins Chrome at a winget-pkgs version Microsoft deleted, so packaging
+      # 404s "No installers found". This local file bumps Chrome to the live version. Built by
+      # intuneget/scripts/patch-catalog-chrome.mjs; distinct from /data/catalog.sqlite (the
+      # download path) so the app's 6h refresh can't overwrite it. Setting this SKIPS all
+      # snapshot networking. Re-run the script when winget-pkgs rolls Chrome to a new version.
+      - CATALOG_SNAPSHOT_FILE=/data/catalog.local.sqlite
 
     volumes:
       - intuneget_data:/data          # holds intuneget.db AND the unpacked catalog snapshot
