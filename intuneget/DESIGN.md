@@ -108,9 +108,34 @@ integration is a `spawn` to `pwsh` running a small script — not a rewrite. The
 runs on the **Windows** side (per §2's build/upload split), where `pwsh` + the module
 are available.
 
-**Open before coding:** (1) is `pwsh` + IntuneWin32App provisioned on the Windows
-packager host? (2) confirm the module's detection-rule handling matches what the web app
-sends per job; (3) decide (a) vs (b) above — default (a).
+**Open before coding — resolved:**
+
+**(2) Detection-rule contract — answered, and it has teeth.** The web app's
+`lib/detection-rules.ts::generateDetectionRules` picks a strategy per installer type and
+emits `detection_rules[]` on the job; the packager's `intune-uploader.ts::buildDetectionRules`
+maps those to Graph `win32LobApp*Detection` payloads (file / registry / msi productCode /
+powerShellScript). IntuneWin32App has exact equivalents (`New-IntuneWin32AppDetectionRule
+-File/-Registry/-MSI/-PowerShell`), so the *shapes* map cleanly. **The catch: for
+exe/inno/nullsoft/burn/portable/zip the web app emits a REGISTRY-MARKER rule pointing at
+`HKLM\SOFTWARE\IntuneGet\Apps\{winget_id}`, and that marker only exists because the PSADT
+script WRITES it during install** (`Set-ADTRegistryKey`, job-processor.ts). Dropping PSADT
+(the whole point of this branch) removes the writer, so the web app's default detection
+for the most common installer types would detect *nothing*. So this branch cannot just
+"swap the builder" — for non-MSI/non-MSIX types it must either (i) re-emit the marker via
+a tiny post-install step (a wrapper cmd/PS one-liner, not full PSADT), or (ii) switch
+those types to a different detection (folder existence / uninstall-registry search — less
+reliable, which is why upstream chose the marker). MSI (productCode) and MSIX (PFN script)
+are unaffected. **This is the real design work of the branch, not the packaging call
+itself.**
+
+**(1) Windows host provisioning — needs a check ON the VM (can't verify from here).** The
+packager host must have `pwsh` (PowerShell 7) + the `IntuneWin32App` module installed
+(`Install-Module IntuneWin32App`), and `IntuneWinAppUtil.exe` (already downloaded today by
+`ensureToolsAvailable` / `download-tools.ps1`). Verify on the packager VM:
+`pwsh -v` and `Get-Module -ListAvailable IntuneWin32App`. Until confirmed, treat as unknown.
+
+**(3)** decide (a) vs (b) above — default (a), and (a) is reinforced by (2): keeping the
+fixed `intune-uploader.ts` means keeping its known-good detection payload mapping too.
 
 ---
 
