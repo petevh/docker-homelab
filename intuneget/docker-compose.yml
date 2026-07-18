@@ -31,6 +31,21 @@ services:
       # The catalog source is chosen by isSupabaseConfigured() (lib/catalog/index.ts), NOT by
       # DATABASE_MODE. Their absence is what routes the catalog to the public snapshot and keeps
       # tokens off Supabase. Do NOT add them to .env either — env_file passes the whole file through.
+      #
+      # Catalog snapshot source (all OPTIONAL — read by lib/catalog/snapshot-store.ts).
+      # Uncommented, they override where the read-only catalog comes from. This is the
+      # "point at your own release" escape hatch (DESIGN.md §5 opt 3): upstream stopped
+      # publishing snapshots on 2026-07-10, so the default download is frozen there and
+      # apps whose winget manifest moved (e.g. Chrome) 404 on the live fetch.
+      #   CATALOG_SNAPSHOT_BASE_URL — override the GitHub `catalog-latest` release base
+      #     the snapshot is downloaded from (must be https). Default = upstream's release.
+      #   CATALOG_SNAPSHOT_FILE     — an explicit local catalog.sqlite; WINS and skips all
+      #     networking. Point it at a snapshot you built by hand to prove the instance reads it.
+      #   CATALOG_SNAPSHOT_DIR      — where the downloaded/unpacked catalog.sqlite lives.
+      #     Default = dirname(DATABASE_PATH) = /data (already on the named volume).
+      # - CATALOG_SNAPSHOT_BASE_URL=${CATALOG_SNAPSHOT_BASE_URL}
+      # - CATALOG_SNAPSHOT_FILE=/data/catalog.sqlite
+      # - CATALOG_SNAPSHOT_DIR=/data
 
     volumes:
       - intuneget_data:/data          # holds intuneget.db AND the unpacked catalog snapshot

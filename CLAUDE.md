@@ -135,6 +135,7 @@ labels:
   - `PACKAGER_MODE=local`, `PACKAGER_API_KEY` — shared secret with the Windows packager
 - **Windows packager dependency:** actual `.intunewin` packaging + upload runs on a separate Windows VM (`@intuneget/packager`), which polls this web app outbound using `PACKAGER_API_KEY`. Set up after the web app is confirmed healthy.
 - **Data:** named volume `intuneget_data:/data` holds both `intuneget.db` and the downloaded catalog snapshot.
+- **Catalog snapshot override (optional):** the read-only catalog defaults to downloading upstream's GitHub `catalog-latest` release, which upstream **froze on 2026-07-10** — so apps whose winget manifest has since moved (e.g. Chrome) 404 on the live fetch. To point at a snapshot you control, set one of (read by `lib/catalog/snapshot-store.ts`, all commented in the compose): `CATALOG_SNAPSHOT_BASE_URL` (override the release base, must be https), `CATALOG_SNAPSHOT_FILE` (explicit local `.sqlite`, **skips all networking**), `CATALOG_SNAPSHOT_DIR` (where the unpacked `catalog.sqlite` lives, defaults to `dirname(DATABASE_PATH)` = `/data`). This is the "point at your own release" path; owning the *populator* that generates the snapshot is still open (see `intuneget/DESIGN.md` §5).
 
 ### Home Assistant
 - **Role:** Home automation
