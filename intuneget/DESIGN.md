@@ -104,9 +104,10 @@ IntuneWin32App reshapes the middle. Mapping onto the real steps:
 
 **Language seam:** packager is TypeScript, IntuneWin32App is PowerShell. `job-processor`
 already `spawn`s child processes (it shells out to `IntuneWinAppUtil.exe`), so the
-integration is a `spawn` to `pwsh` running a small script — not a rewrite. The packager
-runs on the **Windows** side (per §2's build/upload split), where `pwsh` + the module
-are available.
+integration is a `spawn` to **`powershell.exe` (Windows PowerShell 5.1)** running a small
+script — not a rewrite, and NOT `pwsh` (PS7 is not installed on the packager host; the
+module runs fine on 5.1). The packager runs on the **Windows** side (per §2's build/upload
+split), where 5.1 + the module are available once `Install-Module IntuneWin32App` is run.
 
 **Open before coding — resolved:**
 
@@ -128,14 +129,23 @@ reliable, which is why upstream chose the marker). MSI (productCode) and MSIX (P
 are unaffected. **This is the real design work of the branch, not the packaging call
 itself.**
 
-**(1) Windows host provisioning — needs a check ON the VM (can't verify from here).** The
-packager host must have `pwsh` (PowerShell 7) + the `IntuneWin32App` module installed
-(`Install-Module IntuneWin32App`), and `IntuneWinAppUtil.exe` (already downloaded today by
-`ensureToolsAvailable` / `download-tools.ps1`). Verify on the packager VM:
-`pwsh -v` and `Get-Module -ListAvailable IntuneWin32App`. Until confirmed, treat as unknown.
+**(1) Windows host provisioning — checked on the VM (2026-07-19).** Result: the host has
+**Windows PowerShell 5.1** (built-in), **no `pwsh` (PS7), and the module NOT installed**.
+Correction to the earlier plan: IntuneWin32App v1.5.0 requires only **PS 5.0+** (Gallery
+manifest) and as of 1.5.0 has **no external dependencies** (native OAuth, no MSAL.PS). So
+**PS7 is NOT needed** — use the built-in 5.1, and the packager must spawn **`powershell.exe`,
+not `pwsh`** (spawning `pwsh` would fail — it's absent). Only remaining install step:
+`Install-Module IntuneWin32App -Scope AllUsers` (elevated) on the packager VM.
+`IntuneWinAppUtil.exe` is already fetched by `download-tools.ps1`.
 
-**(3)** decide (a) vs (b) above — default (a), and (a) is reinforced by (2): keeping the
-fixed `intune-uploader.ts` means keeping its known-good detection payload mapping too.
+**(3) decide (a) vs (b) — default (a), now strongly reinforced by TWO findings:**
+- from (2): keeping the fixed `intune-uploader.ts` keeps its known-good detection mapping.
+- **auth:** IntuneWin32App does its own OAuth via `Connect-MSIntuneGraph` (incl. client
+  secret). Option (b) (module uploads via `Add-IntuneWin32App`) would need a SECOND Intune
+  connection with the Kemyion secret handled in PowerShell, alongside the packager's
+  existing `graph-client.ts`. Option (a) uses the module for `New-IntuneWin32AppPackage`
+  BUILD ONLY (no Intune connection) and keeps the TS uploader — one auth path, secret stays
+  in the existing code. **Go with (a).**
 
 ---
 
