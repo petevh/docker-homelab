@@ -101,6 +101,72 @@ function readSvrooij() {
   return byId;
 }
 
+// ---- rules-based categorizer (data-driven, no external dependency) ----
+//
+// The frozen catalog is a labeled set: ~10k apps that have BOTH a category and tags.
+// We learn a tag -> category confidence map from it, then score uncategorized (new)
+// apps by summing the confidence of their matched tags. This keeps new winget apps
+// from accumulating as "uncategorized" as the frozen base ages (the drift Pete flagged).
+//
+// Category names are folded to lowercase: the frozen data has a few stray Capitalized
+// rows (Productivity/Utilities/... ~11 total) that are legacy noise, so the canonical
+// taxonomy is the ~34 lowercase categories and we only ever emit those.
+//
+// A per-tag rule is kept only when it is confident (share >= RULE_MIN_SHARE) AND well
+// supported (>= RULE_MIN_SUPPORT). This automatically suppresses generic tags
+// (windows, electron, cross-platform, open-source, cli, ai, ...) which correlate with
+// no single category and fall below the share floor — no hand-maintained stopword list.
+const RULE_MIN_SHARE = 0.6;
+const RULE_MIN_SUPPORT = 5;
+const CATEGORIZE_MIN_SCORE = 0.9; // min summed confidence to assign a category to a new app
+
+function parseTags(tagsJson) {
+  if (!tagsJson) return [];
+  try {
+    const t = JSON.parse(tagsJson);
+    return Array.isArray(t) ? t.map((x) => String(x).toLowerCase().trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Learn tag -> {category, confidence} from the already-categorized frozen apps. */
+function buildTagRules(frozenApps) {
+  const tagCat = new Map(); // tag -> Map(category -> count)
+  for (const a of frozenApps) {
+    if (!a.category) continue;
+    const cat = String(a.category).toLowerCase();
+    for (const tag of parseTags(a.tags)) {
+      if (!tagCat.has(tag)) tagCat.set(tag, new Map());
+      const m = tagCat.get(tag);
+      m.set(cat, (m.get(cat) || 0) + 1);
+    }
+  }
+  const rules = new Map(); // tag -> { cat, conf }
+  for (const [tag, m] of tagCat) {
+    let topCat = null, topCount = 0, total = 0;
+    for (const [cat, c] of m) { total += c; if (c > topCount) { topCount = c; topCat = cat; } }
+    const share = topCount / total;
+    if (share >= RULE_MIN_SHARE && total >= RULE_MIN_SUPPORT) {
+      rules.set(tag, { cat: topCat, conf: share });
+    }
+  }
+  return rules;
+}
+
+/** Score categories for an app by summing matched-tag confidence; return the winner or null. */
+function categorize(app, rules) {
+  const scores = new Map();
+  for (const tag of parseTags(app.tags)) {
+    const r = rules.get(tag);
+    if (!r) continue;
+    scores.set(r.cat, (scores.get(r.cat) || 0) + r.conf);
+  }
+  let best = null, bestScore = 0;
+  for (const [cat, s] of scores) if (s > bestScore) { bestScore = s; best = cat; }
+  return bestScore >= CATEGORIZE_MIN_SCORE ? best : null;
+}
+
 function main() {
   const { apps: frozenApps, sccm } = readFrozen();
   const live = readSvrooij();
@@ -176,6 +242,18 @@ function main() {
   }
 
   console.log(`refreshed: ${refreshed} | kept-stale (not in live, non-variant): ${keptStale} | dropped locale variants: ${droppedVariant} | new apps added: ${added}`);
+
+  // 2b) Categorize apps that have no category (new apps + any uncategorized frozen rows),
+  // using rules learned from the frozen catalog's own labeled apps. Unmatched stay null.
+  const rules = buildTagRules(frozenApps);
+  let categorized = 0, stillNull = 0;
+  for (const a of curatedApps) {
+    if (a.category) continue;
+    const cat = categorize(a, rules);
+    if (cat) { a.category = cat; a.subcategory = null; categorized++; }
+    else stillNull++;
+  }
+  console.log(`categorizer: ${rules.size} tag-rules learned | assigned category to ${categorized} apps | ${stillNull} still uncategorized`);
   console.log(`final curated_apps: ${curatedApps.length} | version_history: ${versionHistory.length}`);
 
   // 3) Build the SQLite file with the verbatim upstream schema.
