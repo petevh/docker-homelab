@@ -184,6 +184,14 @@ question than the one that mattered. Checking, not trusting, was correct every t
 > branch `fix/packager-win32lobapp-create-payload` — **not** in the pinned `v0.7.1`
 > clone, which still ships the five-bug payload. If you reuse the upload half, lift it
 > from the fork, not the clone.
+>
+> **Clone remotes (2026-07-19):** the build clone at `/mnt/development/IntuneGet` now
+> has `origin = git@github.com:petevh/IntuneGet.git` (the fork, holding the fix branch)
+> and `upstream = ugurkocde/IntuneGet` (pull upstream changes from here). Both SSH. HEAD
+> is still detached at `v0.7.1` (that tag was pushed to the fork since forks don't inherit
+> tags), so **the image still builds the five-bug `v0.7.1` payload** — repointing the
+> remote did not change what's built. To ship the upload fix you must check out
+> `fix/packager-win32lobapp-create-payload` (or a tag cut from it) and rebuild.
 
 ---
 
