@@ -72,6 +72,49 @@ the raw path is simpler and drops the custom pipeline entirely.
 own known-good upload code may now beat adopting the module. This changed the moment
 that fix landed. Weigh "reuse fixed fork code" vs. "adopt mature module" when building.
 
+### Detection + packaging hierarchy (decided 2026-07-19)
+
+Windows Claude found — and it was verified — that the IntuneGet registry marker
+(`HKLM\SOFTWARE\IntuneGet\Apps\{id}`) is the *sole deployed detection for essentially
+every app*, not just non-MSI: `lib/detection-rules.ts` returns the marker rule whenever
+`wingetId+version` are present (always true), so the productCode/folder branches are dead
+code at runtime. And **only PSADT writes that marker**. So dropping PSADT breaks detection
+for ALL apps — the earlier "MSI unaffected" note was wrong.
+
+The fix is not "re-write the marker" — it's to stop leaning on the marker at all, because
+the marker has a deeper flaw for this homelab: it only detects apps *IntuneGet installed*.
+An app installed by IT, by the user, or by an older package has no marker → Intune reports
+"not installed" and re-pushes, possibly clobbering a working install. **Native detection
+(product code / uninstall-registry / MSIX PFN) detects the app itself, however it got
+there.** That out-of-band-install capture is the real requirement.
+
+Verified: winget manifests carry a usable native signal for almost everything —
+`ProductCode` is present even on **nullsoft/inno EXE** installers (it's the uninstall
+`DisplayName`/key, e.g. `Notepad++`, `Mozilla Firefox 145.0 (x64 en-US)`), a real GUID on
+MSI/WiX, and `PackageFamilyName` on MSIX. So the marker's genuine value shrinks to a tiny
+tail (installers with no ProductCode; portable/zip with no install footprint).
+
+**The hierarchy — most-native first, marker/PSADT only as last resort** (one rule chooses
+both the packaging tool AND the detection method, per §1):
+
+| Tier | Applies when | Package with | Detect with |
+|---|---|---|---|
+| 1 | app is a real **Store** app (manual check, §4) | Intune *Store app (new)* — don't package | Microsoft-native |
+| 2 | **MSI / WiX** | IntuneWin32App (raw) | MSI **product code** (GUID) |
+| 3 | **MSIX / AppX** | IntuneWin32App (raw) | **PackageFamilyName** script |
+| 4 | **exe / inno / nullsoft** WITH a manifest `ProductCode` | IntuneWin32App (raw) | **uninstall-registry** (DisplayName/DisplayVersion) |
+| 5 | exe with no ProductCode; **zip / portable / unreliable exe** | **PSADT** (kept for this tail) | PSADT-written marker (its legitimate use) |
+
+Consequences:
+- **Tiers 2–4 need a web-app change** in `lib/detection-rules.ts`: prefer native detection
+  over the marker (flip the current marker-first order). This is outside `packager/` and
+  affects the running container — but it's the correct fix and benefits every deployment,
+  not just the new path.
+- **PSADT is NOT fully retired** — it survives as the Tier-5 fallback for the genuinely
+  hard tail (zip/portable/markerless exe). So the branch keeps PSADT provisioning; it just
+  stops being the *default* path. This refines the earlier "retire PSADT" step.
+- The marker stops being universal and becomes Tier-5-only, where it actually adds value.
+
 ### Integration plan (branch `feat/packager-intunewin32app` on the fork)
 
 Branched off `fix/packager-win32lobapp-create-payload` (NOT upstream) so the fixed
@@ -116,18 +159,13 @@ split), where 5.1 + the module are available once `Install-Module IntuneWin32App
 emits `detection_rules[]` on the job; the packager's `intune-uploader.ts::buildDetectionRules`
 maps those to Graph `win32LobApp*Detection` payloads (file / registry / msi productCode /
 powerShellScript). IntuneWin32App has exact equivalents (`New-IntuneWin32AppDetectionRule
--File/-Registry/-MSI/-PowerShell`), so the *shapes* map cleanly. **The catch: for
-exe/inno/nullsoft/burn/portable/zip the web app emits a REGISTRY-MARKER rule pointing at
-`HKLM\SOFTWARE\IntuneGet\Apps\{winget_id}`, and that marker only exists because the PSADT
-script WRITES it during install** (`Set-ADTRegistryKey`, job-processor.ts). Dropping PSADT
-(the whole point of this branch) removes the writer, so the web app's default detection
-for the most common installer types would detect *nothing*. So this branch cannot just
-"swap the builder" — for non-MSI/non-MSIX types it must either (i) re-emit the marker via
-a tiny post-install step (a wrapper cmd/PS one-liner, not full PSADT), or (ii) switch
-those types to a different detection (folder existence / uninstall-registry search — less
-reliable, which is why upstream chose the marker). MSI (productCode) and MSIX (PFN script)
-are unaffected. **This is the real design work of the branch, not the packaging call
-itself.**
+-File/-Registry/-MSI/-PowerShell`), so the *shapes* map cleanly. **The detection problem
+and its resolution are the "Detection + packaging hierarchy" section above** — in short:
+the marker is currently the sole deployed rule for *every* app (not just non-MSI, as an
+earlier draft wrongly said), only PSADT writes it, and the fix is to prefer NATIVE
+detection (product code / uninstall-registry / MSIX PFN — all available from the manifest)
+per the tiered hierarchy, keeping PSADT+marker only for the Tier-5 tail. This spans a
+web-app change (`lib/detection-rules.ts`) as well as the packager.
 
 **(1) Windows host provisioning — checked on the VM (2026-07-19).** Result: the host has
 **Windows PowerShell 5.1** (built-in), **no `pwsh` (PS7), and the module NOT installed**.
