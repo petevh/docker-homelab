@@ -95,10 +95,14 @@ that needs interaction is not a connectivity problem. Consider surfacing
 **Date:** 2026-07-23
 **Severity:** High (client install fails; wrong switches shipped to Intune, so
 every device targeted by the app fails to install)
-**Fork fix:** not yet applied — logged here first
+**Fork fix:** packager side **fixed** (`feat/packager-intunewin32app` @ `ff312e1e4`); web side **fixed on the interactive packaging path** (`feat/web-native-detection`), with the auto-update path logged as a separate follow-up — see **Fix status** below.
 **Affected files (both upstream/main and fork):**
-- `lib/msp/silent-switches.ts:36` — `extractSilentSwitches`
-- `packager/src/job-processor.ts` — `extractSilentSwitches` (upstream/main line 911; the switch is re-derived at line 413 and fed to `getInstallCommand`)
+- `lib/msp/silent-switches.ts` — `extractSilentSwitches` (web app)
+- `packager/src/job-processor.ts` — `extractSilentSwitches` (packager)
+
+The **same broken regex is duplicated** in these two independent copies, on two
+different branches, reached by two different processes. Both had to be fixed
+separately.
 
 ### Symptom
 Packaging **Microsoft.PowerBI** (Power BI Desktop) succeeds and uploads to
@@ -167,6 +171,75 @@ carry the already-normalized silent args (which correctly include `Custom`)
 through to the packager as structured data instead of round-tripping through a
 command string. Minimum fix: the extractor must preserve bare `KEY=VALUE` tokens
 (and pre-strip the quoted installer path so hyphenated filenames don't leak).
+
+### Fix status (fork)
+
+The two copies were fixed with **different** strategies, because the correct
+value is available at different points on each side:
+
+**Packager — `ff312e1e4` (`feat/packager-intunewin32app`).** The packager only
+ever receives the flattened `job.install_command` string, so parsing is its only
+option. Rather than teach the regex about `KEY=VALUE`, the fix **stops
+pattern-matching switches entirely**: strip the leading installer path (quoted,
+or one bare token) and treat everything after it as switches verbatim. This also
+closes the hyphenated-filename leak. Six unit tests added, including the live
+`ACCEPT_EULA=1` and SSMS `--campaign <id>` cases. A second real victim was found
+in the process: SSMS (`vs_SSMS.exe --quiet --wait --campaign <id>`) was failing
+deterministically with exit 5005 because the campaign id (no leading `/`/`-`) was
+truncated to a bare `--campaign`.
+
+_Known residual (packager):_ the unquoted-path branch grabs a single
+whitespace-delimited token, so an **unquoted** path containing spaces
+(`C:\Program Files\App\setup.exe /S`) would still mis-split. Latent — install
+commands are emitted with the path quoted — but not covered by a test.
+
+**Web app — `feat/web-native-detection`.** Fixed on the **interactive
+packaging path** (cart → package → upload — the path the Power BI failure was
+actually on). Different strategy from the packager, because here the
+correctly-normalized `silentArgs` **already exists as a structured field**
+(`normalizeInstaller` → `appendCustomSwitch` in `lib/manifest-api.ts`, stored on
+the installer as `silentArgs`). The web app was flattening it into
+`installCommand` via `generateInstallCommand` and then re-extracting it back out
+with the broken regex. Changes:
+
+- Added `resolveSilentArgs(installer)` (exported from `lib/detection-rules.ts`) —
+  the single source of truth: `installer.silentArgs || getDefaultSilentArgs(type)`.
+  `generateInstallCommand` now calls it (no behaviour change).
+- Added a structured `silentArgs` field to `Win32CartItem` (`types/upload.ts`),
+  populated at every cart-item builder (`stores/cart-store.ts`,
+  `hooks/useQuickAdd.ts`, `hooks/use-bulk-add.ts`, `hooks/use-unmanaged-apps.ts`,
+  `components/PackageDetails.tsx`, `components/PackageConfig.tsx`,
+  `lib/custom-app.ts`).
+- `app/api/package/route.ts` now sends `item.silentArgs` verbatim (extractor kept
+  only as a fallback for carts persisted before the field existed).
+- `lib/msp/batch-orchestrator.ts`: the two `extractSilentSwitches('', type)` calls
+  were only ever a default-switch lookup — now call `getDefaultSilentArgs(type)`.
+- **Hardened the extractor itself** (`lib/msp/silent-switches.ts`) for the paths
+  that still fall back to it (a user-overridden install command in
+  `PackageConfig.tsx`, and legacy carts/policies): strip the leading `msiexec`
+  token / installer path and the msiexec `/i|/x|/p` action + target, then take
+  the remainder **verbatim** instead of the `/`-or-`-` regex. New unit test file
+  `lib/msp/silent-switches.test.ts` (8 cases: `ACCEPT_EULA=1`, `--campaign <id>`,
+  hyphenated filename, msiexec `/i`+`/x` property preservation, `-DeploymentType`
+  fallback). Full related-suite run stayed green (128 tests).
+
+### Follow-up: auto-update path does not resolve `Custom` switches at all (separate gap)
+
+The **auto-update / default-config path** is _not_ fixed and is a distinct,
+deeper problem — not the same drop bug. `buildDefaultDeploymentConfig`
+(`lib/update-policies/build-deployment-config.ts`) constructs a
+`NormalizedInstaller` **without** `silentArgs` (in local mode the catalog
+`version_history` row carries no installer fields), so `generateInstallCommand`
+falls through to the per-type default and the manifest's `Custom` switches
+(e.g. `ACCEPT_EULA=1`) are **never present** — there is nothing for the extractor
+to drop. The `packaging_jobs.silent_switches` column exists in the schema but is
+never written, so it can't be used to carry the value forward either. Properly
+fixing this requires resolving the manifest's `InstallerSwitches.Custom` at
+config-build time (a manifest fetch in the trigger path). `app/api/updates/trigger/route.ts`
+therefore still re-derives switches from `installCommand` and remains subject to
+the drop for that path; a comment there points here. Deferred by choice — the
+interactive path (the reported failure) is fixed; auto-update EULA apps are a
+narrower case to be handled when that path gets a manifest fetch.
 
 ---
 
