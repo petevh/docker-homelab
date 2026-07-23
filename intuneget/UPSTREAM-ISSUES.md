@@ -15,7 +15,7 @@ maintainer fix them, rather than carrying divergence forever.
 
 **Date:** 2026-07-20
 **Severity:** High (app becomes unusable until the user manually clears site data)
-**Fork fix:** `feat/web-native-detection` @ `e534e72d8` — `hooks/useMicrosoftAuth.ts`
+**Fork fix:** `feat/web-native-detection` @ `1916a29b8` — `hooks/useMicrosoftAuth.ts`
 
 ### Symptom
 After the browser session goes stale (expired refresh token/cookie — e.g.
@@ -87,6 +87,86 @@ Silent renew should degrade to an interactive **redirect** on any failure, and
 the `network_error` mapping in `useOnboardingStatus` is misleading — a token
 that needs interaction is not a connectivity problem. Consider surfacing
 "session expired, signing you in…" instead of "check your connection."
+
+---
+
+## 2. Silent-switch extraction drops `KEY=VALUE` installer properties (e.g. `ACCEPT_EULA=1`)
+
+**Date:** 2026-07-23
+**Severity:** High (client install fails; wrong switches shipped to Intune, so
+every device targeted by the app fails to install)
+**Fork fix:** not yet applied — logged here first
+**Affected files (both upstream/main and fork):**
+- `lib/msp/silent-switches.ts:36` — `extractSilentSwitches`
+- `packager/src/job-processor.ts` — `extractSilentSwitches` (upstream/main line 911; the switch is re-derived at line 413 and fed to `getInstallCommand`)
+
+### Symptom
+Packaging **Microsoft.PowerBI** (Power BI Desktop) succeeds and uploads to
+Intune, but the client-side install fails. Windows event log / MSI log:
+
+> Product: Microsoft Power BI Desktop (x64) — EULA has not been accepted while
+> executing the installation in reduced UI mode. Please add the flag
+> ACCEPT_EULA=1 to the command line.
+
+The generated install command reached the packager **with** `ACCEPT_EULA=1`, but
+the switches actually handed to PSADT were only `/quiet /norestart` — the EULA
+flag was silently dropped.
+
+### Root cause
+The winget manifest is correct. `Microsoft.PowerBI` 2.156.951.0 declares:
+
+```yaml
+InstallerType: burn
+InstallerSwitches:
+  Custom: ACCEPT_EULA=1
+```
+
+The web app normalizes this correctly: `normalizeInstaller` +
+`appendCustomSwitch` (`lib/manifest-api.ts`) fold `Custom` onto the silent args,
+producing `/quiet /norestart ACCEPT_EULA=1`, and `generateInstallCommand`
+(`lib/detection-rules.ts`) carries it into the install command. So far correct.
+
+The packager then **re-derives** the switches from that command string via
+`extractSilentSwitches`, whose extraction regex only matches tokens that begin
+with `/` or `-`:
+
+```js
+installCommand.match(/(?:\/\S+|-\S+)(?:\s+(?:\/\S+|-\S+))*/)
+```
+
+`ACCEPT_EULA=1` begins with a letter, so it is not captured. The match also
+stops at the first non-`/`/`-` token, so given `/quiet /norestart ACCEPT_EULA=1`
+it returns `/quiet /norestart` and discards the rest. PSADT then launches the
+burn installer without `ACCEPT_EULA=1` → the EULA error above.
+
+This is not Power BI-specific — it affects **any** app whose manifest uses
+`Custom` switches (or MSI/burn properties) in `KEY=VALUE` form:
+`ACCEPT_EULA=1`, `ALLUSERS=1`, `INSTALLDIR=...`, `TRANSFORMS=...`, etc.
+
+### Secondary defect in the same regex (latent, did not affect Power BI)
+When the installer filename contains hyphens, the `-\S+` alternative matches a
+filename fragment. For
+`"PBIDesktopSetup-2026-07_x64.exe" /quiet /norestart ACCEPT_EULA=1` the regex
+returns `-2026-07_x64.exe" /quiet /norestart` — leaking part of the filename
+into the argument list. (The `lib/msp` copy strips the quoted path first with
+`.replace(/^"[^"]+"\s*/, '')`, so it avoids this case; the packager copy does
+not pre-strip and is exposed to it.)
+
+### Reproduction for upstream
+1. Package `Microsoft.PowerBI` (Power BI Desktop) — a `burn` installer whose
+   manifest declares `InstallerSwitches.Custom: ACCEPT_EULA=1`.
+2. Upload to Intune and target a device.
+3. Install fails: "EULA has not been accepted … add the flag ACCEPT_EULA=1".
+4. Inspect the generated PSADT install step / job `silent_switches`: it contains
+   only `/quiet /norestart`; `ACCEPT_EULA=1` is missing.
+
+### Suggested upstream framing / fix
+The packager should not re-parse switches out of the install-command string with
+a `/`-or-`-` regex at all — it throws away every `KEY=VALUE` property. Preferred:
+carry the already-normalized silent args (which correctly include `Custom`)
+through to the packager as structured data instead of round-tripping through a
+command string. Minimum fix: the extractor must preserve bare `KEY=VALUE` tokens
+(and pre-strip the quoted installer path so hyphenated filenames don't leak).
 
 ---
 
