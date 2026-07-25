@@ -26,7 +26,12 @@ set -euo pipefail
 CONTAINER="intuneget"
 INDEX_URL="https://github.com/svrooij/winget-pkgs-index/raw/main/index.v2.json"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # .../docker-homelab/intuneget
-BUILD_SCRIPT="$REPO_DIR/scripts/build-catalog.mjs"
+# build-catalog.mjs was moved into the IntuneGet source repo (beside the upstream
+# build-catalog-snapshot.mjs whose schema it mirrors). This wrapper stays here (it's
+# docker exec/cron orchestration) but pipes the builder in from the source checkout,
+# which is also this compose's build context (../../IntuneGet).
+SOURCE_DIR="${INTUNEGET_SOURCE_DIR:-$(cd "$REPO_DIR/../../IntuneGet" && pwd)}"
+BUILD_SCRIPT="$SOURCE_DIR/scripts/build-catalog.mjs"
 
 FROZEN="/data/catalog.frozen.bak"       # curation base (in container)
 LIVE="/data/catalog.local.sqlite"       # what the app serves (CATALOG_SNAPSHOT_FILE)
