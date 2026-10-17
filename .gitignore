@@ -26,3 +26,6 @@ intuneget/logs/
 # Frozen curation base — durable NAS copy of the catalog seed (~58MB binary, ZFS-backed).
 # Too large/binary for git; the NAS share IS the durable store. See refresh-catalog.sh.
 intuneget/seed/
+
+__pycache__/
+*.pyc

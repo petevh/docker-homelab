@@ -29,8 +29,11 @@ docker-homelab/
 │           ├── homeassistant.yml
 │           └── omada.yml
 ├── n8n/
-│   ├── docker-compose.yml
-│   └── .env.example
+│   ├── docker-compose.yml       # n8n + pdf-decrypt sidecar
+│   ├── .env.example
+│   ├── private-config.example.json
+│   ├── pdf-decrypt/             # qpdf HTTP sidecar (Dockerfile + server.py)
+│   └── workflows/               # exported workflow JSON (no secrets)
 ├── portainer/
 │   ├── docker-compose.yml
 │   └── .env.example
@@ -106,6 +109,11 @@ labels:
   - `N8N_PROTOCOL=https` — ensures webhooks generate correct https:// URLs
   - `N8N_PORT=5678` — internal listening port (Traefik label must match)
 - **Note:** `N8N_PORT` controls internal port only — external access is always via Traefik on 443
+- **Bank statements workflow** (`n8n/workflows/bank-statements.json`, n8n id `BankStmtGmail001`): Gmail Trigger (hourly, `has:attachment filename:pdf`, credential "Gmail - statements") → match each PDF to an account → decrypt → upload to that account's `onedrive_folder` as `YYYY-MM-DD_<original name>` (credential "Onedrive - Pete", Graph PUT-by-path, `conflictBehavior=replace`).
+  - **`pdf-decrypt` sidecar** (`n8n/pdf-decrypt/`, container `n8n-pdf-decrypt`, second service in the n8n compose): n8n's image is a hardened Alpine with no `apk`, so qpdf lives here. Internal only — `http://pdf-decrypt:8080` on the `traefik` network, no Traefik labels. `GET /accounts` (match rules + folders, passwords stripped), `POST /decrypt?account=KEY` (unencrypted PDFs pass through unchanged). It reads the PDF passwords from `private-config.json` itself, so they never enter n8n execution data.
+  - **Routing lives in `private-config.json`** (the bank-automation v2.0 schema: `banks.<bank>.accounts[].statements.{decryption_password, onedrive_folder, match}`; `match` = `{from, subject, filename}`). The account key passed to the sidecar is the account's `key` field, else `<bank>.<slug(name)>`. See `private-config.example.json`. An account with empty rules never matches; unmatched PDFs are silently skipped.
+  - **n8n itself cannot read `/data/private-config.json`** (EACCES: NAS file is 770 `pvh`, n8n runs as uid 1000) — that's why the sidecar runs as `3000:3000` and serves the config. The file is a single-file bind mount: edit it in place; if an editor replaces the file (new inode) run `docker compose restart pdf-decrypt`.
+  - Re-import after editing the JSON: `docker exec -i n8n sh -c 'cat > ~/.n8n/wf.json' < workflows/bank-statements.json && docker exec n8n n8n import:workflow --input=/home/node/.n8n/wf.json` (import deactivates the workflow — re-activate in the UI).
 
 ### Portainer
 - **Role:** Docker container management UI

@@ -1,46 +1,19 @@
 {
-  "_comment": "Copy to private-config.json and fill in real values. NEVER commit private-config.json.",
-
+  "_comment": "Subset of the bank-automation v2.0 private-config used by the statements workflow. Copy to private-config.json and fill in real values. NEVER commit private-config.json.",
   "banks": {
-    "enbd_current_pete": {
-      "decryption_password": "your-pdf-password-here",
-      "ynab_account_id": "your-ynab-account-uuid",
-      "actual_account_name": "ENBD Pete",
-      "onedrive_folder": "Documents/Bank/Emirates NBD/Current",
-      "cards": []
-    },
-    "enbd_savings_fi": {
-      "decryption_password": "your-pdf-password-here",
-      "ynab_account_id": "your-ynab-account-uuid",
-      "actual_account_name": "ENBD - Fi",
-      "onedrive_folder": "Documents/Bank/Emirates NBD - Fi/Savings"
-    },
-    "enbd_visa_infinite": {
-      "decryption_password": "your-pdf-password-here",
-      "ynab_account_id": "your-ynab-account-uuid",
-      "actual_account_name": "ENBD-Visa-Infinite",
-      "onedrive_folder": "Bank Statements/ENBD/CreditCard",
-      "cards": [
+    "enbd_ae": {
+      "accounts": [
         {
-          "last4": "0000",
-          "cardholder": "Primary"
+          "name": "ENBD Visa Infinite",
+          "key": "enbd_visa_infinite",
+          "statements": {
+            "decryption_password": "your-pdf-password-here",
+            "onedrive_folder": "Bank Statements/ENBD/CreditCard",
+            "match": { "from": "", "subject": "", "filename": "^creditcard_.*\\.pdf$" }
+          }
         }
       ]
     }
   },
-
-  "ynab": {
-    "budgets": {
-      "AED": "your-ynab-budget-uuid",
-      "USD": "your-ynab-budget-uuid",
-      "EUR": "your-ynab-budget-uuid",
-      "ZAR": "your-ynab-budget-uuid"
-    },
-    "default_budget_id": "your-ynab-budget-uuid"
-  },
-
-  "actual": {
-    "server_url": "https://actual.app.vanheerden.ch",
-    "sync_id": "your-sync-id"
-  }
+  "_match_help": "match rules route statement emails to an account. All case-insensitive: from = substring of sender, subject/filename = regex. Empty rules are ignored; all non-empty rules must match; an account with no rules never matches. Optional per-account 'key' sets the id used by the sidecar; default is <bank>.<slug(name)>."
 }

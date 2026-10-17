@@ -23,7 +23,7 @@ services:
 
     volumes:
       - n8n_data:/home/node/.n8n
-      - ./private-config.json:/data/private-config.json:ro
+      - ${BANK_CONFIG_FILE:-../../bank-automation/private-config.json}:/data/private-config.json:ro
 
     labels:
       - "traefik.enable=true"
@@ -32,6 +32,32 @@ services:
       - "traefik.http.routers.n8n.tls.certresolver=cloudflare"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
 
+    networks:
+      - traefik
+
+  # qpdf sidecar for the "Bank statements" workflow — n8n's hardened image has
+  # no package manager. Internal only (no Traefik labels); n8n reaches it at
+  # http://pdf-decrypt:8080. Holds the PDF passwords so they never enter n8n.
+  pdf-decrypt:
+    build: ./pdf-decrypt
+    container_name: n8n-pdf-decrypt
+    restart: unless-stopped
+    # NAS share is 770 pvh:pvh — must run as that uid to read the config
+    user: "3000:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${BANK_CONFIG_FILE:-../../bank-automation/private-config.json}:/config/private-config.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - traefik
 
