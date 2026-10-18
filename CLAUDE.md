@@ -31,9 +31,10 @@ docker-homelab/
 ├── n8n/
 │   ├── docker-compose.yml       # n8n + pdf-decrypt sidecar
 │   ├── .env.example
-│   ├── private-config.example.json
+│   ├── private-config.example.json   # subset of the bank-automation v2.0 config
 │   ├── pdf-decrypt/             # qpdf HTTP sidecar (Dockerfile + server.py)
-│   └── workflows/               # exported workflow JSON (no secrets)
+│   ├── tools/                   # build-workflow.py (embed code), last-run.js (inspect a run)
+│   └── workflows/               # exported workflow JSON (no secrets) + src/ (readable Code-node sources)
 ├── portainer/
 │   ├── docker-compose.yml
 │   └── .env.example
@@ -47,8 +48,9 @@ docker-homelab/
 │   ├── docker-compose.yml
 │   └── .env.example
 └── docs/
-    ├── adding-new-service.md    # How to add a new container
-    └── network-architecture.md
+    ├── bank-statements-workflow.md   # the n8n statement-filing workflow: behaviour, ops, troubleshooting
+    ├── adding-new-service.md         # NOT WRITTEN YET (see "Adding a New Service" below)
+    └── network-architecture.md       # NOT WRITTEN YET
 ```
 
 ## Network Architecture
@@ -109,14 +111,12 @@ labels:
   - `N8N_PROTOCOL=https` — ensures webhooks generate correct https:// URLs
   - `N8N_PORT=5678` — internal listening port (Traefik label must match)
 - **Note:** `N8N_PORT` controls internal port only — external access is always via Traefik on 443
-- **Bank statements workflow** (`n8n/workflows/bank-statements.json`, n8n id `BankStmtGmail001`): Gmail Trigger (hourly, `{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za}`, credential "Gmail - statements") → match each PDF to an account → fetch linked PDFs (link-based accounts only) → decrypt → upload to that account's `onedrive_folder` as `YYYY-MM-DD_<account key>_<original name>.pdf` (override per account with `statements.filename_template`; tokens `{date} {year} {month} {key} {name} {original}`) (credential "Onedrive - Pete", Graph PUT-by-path, `conflictBehavior=replace`).
-  - **`pdf-decrypt` sidecar** (`n8n/pdf-decrypt/`, container `n8n-pdf-decrypt`, second service in the n8n compose): n8n's image is a hardened Alpine with no `apk`, so qpdf lives here. Internal only — `http://pdf-decrypt:8080` on the `traefik` network, no Traefik labels. `GET /accounts` (match rules + folders, passwords stripped), `POST /decrypt?account=KEY` (unencrypted PDFs pass through unchanged). It reads the PDF passwords from the passwords file itself, so they never enter n8n execution data.
-  - **Routing lives in `private-config.json`** (the bank-automation v2.0 schema: `banks.<bank>.accounts[].statements.{onedrive_folder, match, link}`; `match` = a rule `{from, to, subject, filename}` or a list of rules; `to` is a substring of the To header, used for plus-addressed mailboxes like `statements+julia@`). The account key passed to the sidecar is the account's `key` field, else `<bank>.<slug(name)>`. See `private-config.example.json`. An account with empty rules never matches; unmatched PDFs are silently skipped.
-  - **PDF passwords live in a separate file**, `statement-passwords.json` (`{account key: password}` — a value may also be a **list**, tried in order until one works, for wrong-on-file periods, rotation or bank alternatives; the response header `X-Password-Index` says which entry worked, never the password; mounted into the sidecar only via `BANK_PASSWORDS_FILE`; git-ignored in bank-automation). The file must exist before `docker compose up` or Docker creates a directory in its place. Claude Code is denied reading it (`~/.claude/settings.json`).
-  - **Link statements** (e.g. ReMax: no attachment, an emailed download link): set `statements.link = {enabled: true, allow_hosts: [...]}`. The workflow follows only links on those hosts and accepts only a real PDF; a link email that yields no PDF fails the run. `match` rules with a `filename` cannot apply to link emails.
-  - **Manual/test path:** the **Manual Scan** trigger runs **Scan Inbox** (last 30 days; edit `newer_than`). Forwards from `pete@vanheerden.ch` are unwrapped — the original sender/subject/recipient are read from the "Forwarded message" block (`TRUSTED_FORWARDERS` in the Match node) — so a one-off manual forward is matched exactly like the original. Both the forward's own To and the original To are kept, so a plus-address rule (`to: statements+rob@`) works on a forward sent to that address. The Match node takes the emails as its input and fetches `/accounts` itself (no lookups of other nodes by name, no silent empty result). Gmail filter auto-forwarding keeps the original headers and needs no unwrapping.
-  - **n8n itself cannot read `/data/private-config.json`** (EACCES: NAS file is 770 `pvh`, n8n runs as uid 1000) — that's why the sidecar runs as `3000:3000` and serves the config. The file is a single-file bind mount: edit it in place; if an editor replaces the file (new inode) run `docker compose restart pdf-decrypt`.
-  - Re-import after editing the JSON: `docker exec -i n8n sh -c 'cat > ~/.n8n/wf.json' < workflows/bank-statements.json && docker exec n8n n8n import:workflow --input=/home/node/.n8n/wf.json` (import deactivates the workflow — re-activate in the UI).
+- **Bank statements workflow** (`n8n/workflows/bank-statements.json`, n8n id `BankStmtGmail001`): files every emailed statement (banks, cards, property agents, municipalities, Discovery medical) into OneDrive, decrypting PDFs on the way. Gmail Trigger (hourly) or **Manual Scan** (last 30 days) → **Match Statements** → **Fetch Linked PDFs** (link-based statements only) → **Decrypt PDF** → **Upload to OneDrive**. Credentials "Gmail - statements" and "Onedrive - Pete". **Full documentation: `docs/bank-statements-workflow.md`**; config schema: `bank-automation/docs/statements-config.md`.
+  - **`pdf-decrypt` sidecar** (`n8n/pdf-decrypt/`, container `n8n-pdf-decrypt`): qpdf over HTTP, internal only (`http://pdf-decrypt:8080`, no Traefik labels), runs read-only as uid 3000. `GET /accounts` (per account: `match`, `onedrive_folder`, `link`, `filename_template`, `date_source`, `name`; never passwords), `POST /decrypt?account=KEY` (tries no password first, then the account's password list; unencrypted PDFs pass through; `X-Password-Index` -1/-2/n). Redeploy after editing: `cd n8n && docker compose up -d --build --no-deps pdf-decrypt`.
+  - **Config lives outside this repo** in `bank-automation` (`private-config.json`, v2.0 schema) and PDF passwords in a separate `statement-passwords.json` (a value may be a list). Both are single-file bind mounts via `BANK_CONFIG_FILE` / `BANK_PASSWORDS_FILE` (defaults `../../bank-automation/...`). **The passwords file must exist before `docker compose up`** (Docker would create a directory). Edit both in place; if an editor replaces the file run `docker compose restart pdf-decrypt`. n8n itself cannot read them (NAS perms 770 `pvh`, n8n is uid 1000) — that is why the sidecar serves the account list. Claude Code is denied reading the passwords file (`~/.claude/settings.json`; blocks the obvious routes only).
+  - **Code nodes:** edit `n8n/workflows/src/*.js`, then `python3 n8n/tools/build-workflow.py` (embeds into the JSON; `--check`, `--extract`). Re-import: `docker exec -i n8n sh -c 'cat > ~/.n8n/wf.json' < n8n/workflows/bank-statements.json && docker exec n8n n8n import:workflow --input=/home/node/.n8n/wf.json` — **import deactivates the workflow; re-activate with Publish (n8n 2.x)**.
+  - **Debug a run:** `docker exec -i n8n node - < n8n/tools/last-run.js` (metadata only). n8n's Code node sandbox has **no `URL` class** — parse hosts with a regex and test code inside n8n, not only in Node.
+  - **Gotchas:** trusted forwarders (`TRUSTED_FORWARDERS` in the Match source) are only unwrapped if Google's `Authentication-Results` shows an aligned pass (DMARC is `p=none`); attachment names with `/` are truncated to the part after the slash; a missing/wrong password fails the file *and stops the run*; the Google OAuth app must be "In production" or tokens die after 7 days; the Entra client secret for OneDrive expires (max 24 months).
 
 ### Portainer
 - **Role:** Docker container management UI

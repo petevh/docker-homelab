@@ -60,6 +60,7 @@ def load_banks():
                 "match": st.get("match", {}),
                 "link": st.get("link", {}),
                 "filename_template": st.get("filename_template", ""),
+                "date_source": st.get("date_source", ""),
                 "name": acct.get("name", ""),
             }
     return out
@@ -103,6 +104,15 @@ def decrypt(pdf, passwords):
         if qpdf("--is-encrypted", src).returncode != 0:
             return pdf, False, -1
 
+        # Many "encrypted" statements only carry owner restrictions and open with no
+        # password at all. qpdf rejects a *wrong* password even then, so try none first.
+        # --requires-password exit: 0 = a password is needed, 3 = opens without one.
+        if qpdf("--requires-password", src).returncode == 3:
+            result = qpdf("--decrypt", src, dst)
+            if result.returncode in (0, 3) and os.path.exists(dst):
+                with open(dst, "rb") as f:
+                    return f.read(), True, -2
+
         for index, password in enumerate(candidates):
             # Password goes via a file so it never appears in the process list.
             with open(pwfile, "w", encoding="utf-8") as f:
@@ -144,6 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                     "onedrive_folder": bank.get("onedrive_folder", ""),
                     "link": bank.get("link", {}),
                     "filename_template": bank.get("filename_template", ""),
+                    "date_source": bank.get("date_source", ""),
                     "name": bank.get("name", ""),
                 }
                 for key, bank in banks.items()
@@ -177,7 +188,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Length", str(len(out)))
         self.send_header("X-Was-Encrypted", "true" if was_encrypted else "false")
-        # which entry of the account's password list worked (-1: not encrypted)
+        # which entry of the account's password list worked (-1: not encrypted,
+        # -2: encrypted but needed no password)
         self.send_header("X-Password-Index", str(used))
         self.end_headers()
         self.wfile.write(out)
