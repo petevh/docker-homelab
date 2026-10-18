@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/private-config.json")
+PASSWORDS_PATH = os.environ.get("PASSWORDS_PATH", "/config/statement-passwords.json")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_BODY = 50 * 1024 * 1024
 
@@ -27,22 +28,34 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
+def load_passwords():
+    """{account_key: password} from the separate passwords file; {} if absent."""
+    try:
+        with open(PASSWORDS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
 def load_banks():
     """Return {account_key: {decryption_password, onedrive_folder, match}}.
 
     Reads banks.<bank>.accounts[].statements from the v2.0 config. The key is
-    the account's "key" if set, else "<bank>.<slug(name)>". Re-read on every
-    request so config edits apply without a restart.
+    the account's "key" if set, else "<bank>.<slug(name)>". Passwords come from
+    the separate passwords file (keyed by account key) so the main config holds
+    no secrets; a statements.decryption_password still in the main config is
+    the fallback. Re-read on every request so edits apply without a restart.
     """
     with open(CONFIG_PATH, encoding="utf-8") as f:
         banks = json.load(f).get("banks", {})
+    passwords = load_passwords()
     out = {}
     for bank_id, bank in banks.items():
         for acct in bank.get("accounts", []):
             st = acct.get("statements", {})
             key = acct.get("key") or f"{bank_id}.{slug(acct.get('name', ''))}"
             out[key] = {
-                "decryption_password": st.get("decryption_password", ""),
+                "decryption_password": passwords.get(key, st.get("decryption_password", "")),
                 "onedrive_folder": st.get("onedrive_folder", ""),
                 "match": st.get("match", {}),
             }

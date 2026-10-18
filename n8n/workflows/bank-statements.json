@@ -57,7 +57,7 @@
         "typeVersion": 2,
         "position": [440, 0],
         "parameters": {
-          "jsCode": "// One output item per PDF attachment that matches an account's `match` rules.\n// Rules (private-config.json → banks.<key>.match), all case-insensitive:\n//   from     – substring of the sender address / display name\n//   subject  – regex against the subject\n//   filename – regex against the attachment filename\n// Empty rules are ignored; every non-empty rule must match. An account with\n// no rules never matches. If several accounts match, the one with the most\n// rules wins. PDFs that match nothing are dropped.\nconst accounts = $('Get Accounts').first().json;\n\nconst rulesOf = (m = {}) =>\n  ['from', 'subject', 'filename'].filter((k) => (m[k] || '').trim() !== '');\n\nfunction matches(m, mail) {\n  const rules = rulesOf(m);\n  if (rules.length === 0) return false;\n  return rules.every((k) => {\n    if (k === 'from') return mail.from.toLowerCase().includes(m.from.trim().toLowerCase());\n    return new RegExp(m[k], 'i').test(mail[k]);\n  });\n}\n\nconst out = [];\nconst emails = $('Gmail Trigger').all();\n\nemails.forEach((item, index) => {\n  const j = item.json;\n  const fromObj = j.from || {};\n  const from = [\n    ...(fromObj.value || []).map((v) => `${v.name || ''} <${v.address || ''}>`),\n    fromObj.text || '',\n    typeof j.from === 'string' ? j.from : '',\n    j.From || '',\n  ].join(' ');\n  const subject = j.subject || j.Subject || '';\n  const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());\n  const day = (isNaN(parsed) ? new Date() : parsed).toISOString().slice(0, 10);\n\n  for (const bin of Object.values(item.binary || {})) {\n    const original = bin.fileName || 'statement.pdf';\n    const isPdf = bin.mimeType === 'application/pdf' || /\\.pdf$/i.test(original);\n    if (!isPdf) continue;\n\n    const mail = { from, subject, filename: original };\n    const hit = Object.entries(accounts)\n      .filter(([, a]) => matches(a.match, mail))\n      .sort((a, b) => rulesOf(b[1].match).length - rulesOf(a[1].match).length)[0];\n    if (!hit) continue;\n\n    const [account, cfg] = hit;\n    const folder = (cfg.onedrive_folder || '').replace(/^\\/+|\\/+$/g, '');\n    if (!folder) throw new Error(`Account ${account} has no onedrive_folder in private-config.json`);\n\n    // Banks reuse the same attachment name every month, so prefix the email date.\n    let safe = original.replace(/[\\\\/:*?\"<>|#%]/g, '_').trim();\n    if (!/\\.pdf$/i.test(safe)) safe += '.pdf';\n    const fileName = `${day}_${safe}`;\n    const uploadPath = [...folder.split('/'), fileName].map(encodeURIComponent).join('/');\n\n    out.push({\n      json: { account, folder, fileName, uploadPath, messageId: j.id, subject, from: from.trim() },\n      binary: { data: bin },\n      pairedItem: { item: index },\n    });\n  }\n});\n\nreturn out;\n"
+          "jsCode": "// One output item per PDF attachment that matches an account's `match` rules.\n// Rules (private-config.json → banks.<key>.match), all case-insensitive:\n//   from     – substring of the sender address / display name\n//   to       – substring of the To header (e.g. statements+julia@ plus-addressing)\n//   subject  – regex against the subject\n//   filename – regex against the attachment filename\n// Empty rules are ignored; every non-empty rule must match. An account with\n// no rules never matches. If several accounts match, the one with the most\n// rules wins. PDFs that match nothing are dropped.\nconst accounts = $('Get Accounts').first().json;\n\nconst rulesOf = (m = {}) =>\n  ['from', 'to', 'subject', 'filename'].filter((k) => (m[k] || '').trim() !== '');\n\nfunction matches(m, mail) {\n  const rules = rulesOf(m);\n  if (rules.length === 0) return false;\n  return rules.every((k) => {\n    if (k === 'from' || k === 'to') return mail[k].toLowerCase().includes(m[k].trim().toLowerCase());\n    return new RegExp(m[k], 'i').test(mail[k]);\n  });\n}\n\nconst out = [];\n// Hourly Gmail Trigger or the manual 'Scan Inbox' - whichever ran in this execution.\nconst emails = ['Gmail Trigger', 'Scan Inbox'].flatMap((n) => {\n  try { return $(n).all(); } catch (e) { return []; }\n});\n\nemails.forEach((item, index) => {\n  const j = item.json;\n  const fromObj = j.from || {};\n  const from = [\n    ...(fromObj.value || []).map((v) => `${v.name || ''} <${v.address || ''}>`),\n    fromObj.text || '',\n    typeof j.from === 'string' ? j.from : '',\n    j.From || '',\n  ].join(' ');\n  const toObj = j.to || {};\n  const to = [\n    ...(toObj.value || []).map((v) => `${v.name || ''} <${v.address || ''}>`),\n    toObj.text || '',\n    typeof j.to === 'string' ? j.to : '',\n    j.To || '',\n  ].join(' ');\n  const subject = j.subject || j.Subject || '';\n  const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());\n  const day = (isNaN(parsed) ? new Date() : parsed).toISOString().slice(0, 10);\n\n  for (const bin of Object.values(item.binary || {})) {\n    const original = bin.fileName || 'statement.pdf';\n    const isPdf = bin.mimeType === 'application/pdf' || /\\.pdf$/i.test(original);\n    if (!isPdf) continue;\n\n    const mail = { from, to, subject, filename: original };\n    const hit = Object.entries(accounts)\n      .filter(([, a]) => matches(a.match, mail))\n      .sort((a, b) => rulesOf(b[1].match).length - rulesOf(a[1].match).length)[0];\n    if (!hit) continue;\n\n    const [account, cfg] = hit;\n    const folder = (cfg.onedrive_folder || '').replace(/^\\/+|\\/+$/g, '');\n    if (!folder) throw new Error(`Account ${account} has no onedrive_folder in private-config.json`);\n\n    // Banks reuse the same attachment name every month, so prefix the email date.\n    let safe = original.replace(/[\\\\/:*?\"<>|#%]/g, '_').trim();\n    if (!/\\.pdf$/i.test(safe)) safe += '.pdf';\n    const fileName = `${day}_${safe}`;\n    const uploadPath = [...folder.split('/'), fileName].map(encodeURIComponent).join('/');\n\n    out.push({\n      json: { account, folder, fileName, uploadPath, messageId: j.id, subject, from: from.trim() },\n      binary: { data: bin },\n      pairedItem: { item: index },\n    });\n  }\n});\n\nreturn out;\n"
         }
       },
       {
@@ -135,6 +135,43 @@
         "parameters": {
           "errorMessage": "=Could not decrypt {{ $('Match Statements').item.json.fileName }} for account {{ $('Match Statements').item.json.account }}: {{ $json.error.message || JSON.stringify($json.error) }}"
         }
+      },
+      {
+        "parameters": {},
+        "id": "f3ad9e70-21ba-4a0a-b2d9-8d68d9ca15e2",
+        "name": "Manual Scan",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [0, 220],
+        "notes": "Click 'Execute workflow' to scan the inbox now (see Scan Inbox for the window)."
+      },
+      {
+        "parameters": {
+          "resource": "message",
+          "operation": "getAll",
+          "returnAll": false,
+          "limit": 100,
+          "simple": false,
+          "filters": {
+            "includeSpamTrash": false,
+            "q": "has:attachment filename:pdf newer_than:30d"
+          },
+          "options": {
+            "downloadAttachments": true
+          }
+        },
+        "id": "3672e8e5-7c5e-4b33-b726-797087ef398b",
+        "name": "Scan Inbox",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2.1,
+        "position": [220, 220],
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "TUkCChxZzPqIzy9d",
+            "name": "Gmail - statements"
+          }
+        },
+        "notes": "Manual runs only. Change newer_than:30d to widen/narrow the window. Re-running is safe: uploads use conflictBehavior=replace."
       }
     ],
     "connections": {
@@ -183,6 +220,28 @@
           [
             {
               "node": "Decrypt Failed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Scan": {
+        "main": [
+          [
+            {
+              "node": "Scan Inbox",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Scan Inbox": {
+        "main": [
+          [
+            {
+              "node": "Get Accounts",
               "type": "main",
               "index": 0
             }

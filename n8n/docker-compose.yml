@@ -53,6 +53,8 @@ services:
       - no-new-privileges:true
     volumes:
       - ${BANK_CONFIG_FILE:-../../bank-automation/private-config.json}:/config/private-config.json:ro
+      # Must exist before `up` (Docker would create a directory in its place)
+      - ${BANK_PASSWORDS_FILE:-../../bank-automation/statement-passwords.json}:/config/statement-passwords.json:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s
