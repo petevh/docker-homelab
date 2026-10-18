@@ -183,6 +183,11 @@ Services to be added as part of active projects:
 | PostgreSQL | `energy-monitor` | Time-series energy data |
 | Paperless-ngx | `docker-homelab` | Document management |
 | Wazuh agents | `homelab-soc` | SIEM log shipping |
+| Statement parser + reconciler (service) | `bank-automation` | Extract transactions from filed statements, reconcile against YNAB, transfers |
+| Medical aid tracker (web app) | tbd | Discovery claims and oncology benefit usage |
+
+The full plan for the transaction feed, statement extraction, reconciliation, transfers and the downstream
+apps (energy/ROI, medical tracker), plus open housekeeping, is in `bank-automation/docs/ROADMAP.md`.
 
 ## Secrets & Environment Variables
 
