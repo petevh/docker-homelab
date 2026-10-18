@@ -24,7 +24,7 @@
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf"
+            "q": "{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za}"
           },
           "options": {
             "downloadAttachments": true
@@ -57,7 +57,7 @@
         "typeVersion": 2,
         "position": [440, 0],
         "parameters": {
-          "jsCode": "// One output item per PDF attachment that matches an account's `match` rules.\n// Rules (private-config.json → banks.<key>.match), all case-insensitive:\n//   from     – substring of the sender address / display name\n//   to       – substring of the To header (e.g. statements+julia@ plus-addressing)\n//   subject  – regex against the subject\n//   filename – regex against the attachment filename\n// Empty rules are ignored; every non-empty rule must match. An account with\n// no rules never matches. If several accounts match, the one with the most\n// rules wins. PDFs that match nothing are dropped.\nconst accounts = $('Get Accounts').first().json;\n\nconst rulesOf = (m = {}) =>\n  ['from', 'to', 'subject', 'filename'].filter((k) => (m[k] || '').trim() !== '');\n\nfunction matches(m, mail) {\n  const rules = rulesOf(m);\n  if (rules.length === 0) return false;\n  return rules.every((k) => {\n    if (k === 'from' || k === 'to') return mail[k].toLowerCase().includes(m[k].trim().toLowerCase());\n    return new RegExp(m[k], 'i').test(mail[k]);\n  });\n}\n\nconst out = [];\n// Hourly Gmail Trigger or the manual 'Scan Inbox' - whichever ran in this execution.\nconst emails = ['Gmail Trigger', 'Scan Inbox'].flatMap((n) => {\n  try { return $(n).all(); } catch (e) { return []; }\n});\n\nemails.forEach((item, index) => {\n  const j = item.json;\n  const fromObj = j.from || {};\n  const from = [\n    ...(fromObj.value || []).map((v) => `${v.name || ''} <${v.address || ''}>`),\n    fromObj.text || '',\n    typeof j.from === 'string' ? j.from : '',\n    j.From || '',\n  ].join(' ');\n  const toObj = j.to || {};\n  const to = [\n    ...(toObj.value || []).map((v) => `${v.name || ''} <${v.address || ''}>`),\n    toObj.text || '',\n    typeof j.to === 'string' ? j.to : '',\n    j.To || '',\n  ].join(' ');\n  const subject = j.subject || j.Subject || '';\n  const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());\n  const day = (isNaN(parsed) ? new Date() : parsed).toISOString().slice(0, 10);\n\n  for (const bin of Object.values(item.binary || {})) {\n    const original = bin.fileName || 'statement.pdf';\n    const isPdf = bin.mimeType === 'application/pdf' || /\\.pdf$/i.test(original);\n    if (!isPdf) continue;\n\n    const mail = { from, to, subject, filename: original };\n    const hit = Object.entries(accounts)\n      .filter(([, a]) => matches(a.match, mail))\n      .sort((a, b) => rulesOf(b[1].match).length - rulesOf(a[1].match).length)[0];\n    if (!hit) continue;\n\n    const [account, cfg] = hit;\n    const folder = (cfg.onedrive_folder || '').replace(/^\\/+|\\/+$/g, '');\n    if (!folder) throw new Error(`Account ${account} has no onedrive_folder in private-config.json`);\n\n    // Banks reuse the same attachment name every month, so prefix the email date.\n    let safe = original.replace(/[\\\\/:*?\"<>|#%]/g, '_').trim();\n    if (!/\\.pdf$/i.test(safe)) safe += '.pdf';\n    const fileName = `${day}_${safe}`;\n    const uploadPath = [...folder.split('/'), fileName].map(encodeURIComponent).join('/');\n\n    out.push({\n      json: { account, folder, fileName, uploadPath, messageId: j.id, subject, from: from.trim() },\n      binary: { data: bin },\n      pairedItem: { item: index },\n    });\n  }\n});\n\nreturn out;\n"
+          "jsCode": "// One output item per PDF attachment that matches an account's `match` rules, plus\n// one per email for accounts with `link.enabled` whose statement arrives as a\n// download link instead of an attachment (fetched by the next node).\n//\n// `match` is a rule object or a list of them (any rule may match). Per rule, all\n// case-insensitive; empty fields are ignored and every non-empty field must match:\n//   from     – substring of the sender address / display name\n//   to       – substring of the To header (e.g. statements+julia@ plus-addressing)\n//   subject  – regex against the subject\n//   filename – regex against the attachment filename (not usable for link accounts)\n// A rule with no fields never matches. If several accounts match, the one with the\n// most matching fields wins. Emails that match nothing are dropped.\n//\n// Forwards from TRUSTED_FORWARDERS are unwrapped: the original sender, subject and\n// recipient are read from the \"Forwarded message\" block, so a one-off manual forward\n// is matched exactly as the original email would have been.\nconst TRUSTED_FORWARDERS = ['pete@vanheerden.ch'];\nconst MAX_LINKS = 15;\n\nconst accounts = $('Get Accounts').first().json;\nconst FIELDS = ['from', 'to', 'subject', 'filename'];\n\nconst asRules = (m) => (Array.isArray(m) ? m : m ? [m] : []);\nconst fieldsOf = (r = {}) => FIELDS.filter((k) => (r[k] || '').trim() !== '');\n\nfunction ruleScore(r, mail) {\n  const keys = fieldsOf(r);\n  if (keys.length === 0) return 0;\n  const ok = keys.every((k) => {\n    if (k === 'from' || k === 'to') return mail[k].toLowerCase().includes(r[k].trim().toLowerCase());\n    return new RegExp(r[k], 'i').test(mail[k]);\n  });\n  return ok ? keys.length : 0;\n}\n\n// Best score across an account's rules (0 = no match). For link emails there is\n// no attachment, so a rule that needs a filename cannot apply.\nconst score = (m, mail, noFilename) =>\n  Math.max(0, ...asRules(m).map((r) => (noFilename && (r.filename || '').trim() ? 0 : ruleScore(r, mail))));\n\nconst hdr = (v, alt) =>\n  [\n    ...((v && v.value) || []).map((x) => `${x.name || ''} <${x.address || ''}>`),\n    (v && v.text) || '',\n    typeof v === 'string' ? v : '',\n    alt || '',\n  ].join(' ');\n\nconst stripTags = (h) =>\n  h\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<\\/(p|div|tr|li)>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&amp;/g, '&');\n\n// Reads the quoted header block of a forward. Handles Gmail (\"---------- Forwarded\n// message ---------\" then From:/Date:/Subject:/To:) and Outlook (\"From: / Sent: / To:\n// / Subject:\" at the top of the body, labels often wrapped as *From:*), including\n// values that wrap onto the next line (e.g. a long address after \"<\").\nfunction unwrapForward(mail, body) {\n  if (!TRUSTED_FORWARDERS.some((f) => mail.from.toLowerCase().includes(f.toLowerCase()))) return mail;\n  const marker = body.match(/(?:Forwarded message|Original Message)\\s*-{3,}/i);\n  const from0 = marker ? marker.index : 0;\n  const win = body.slice(from0, from0 + 3000);\n  const start = win.search(/\\*?From\\s*:\\*?/i);\n  if (start < 0 || start > (marker ? 200 : 600)) return mail;\n\n  const labels = [...win.slice(start).matchAll(/\\*?\\b(From|Sent|Date|To|Cc|Bcc|Subject)\\s*:\\*?/gi)];\n  const got = {};\n  for (let i = 0; i < labels.length; i++) {\n    const key = labels[i][1].toLowerCase();\n    if (key in got) break;\n    const valueStart = labels[i].index + labels[i][0].length;\n    const rest = win.slice(start);\n    let value;\n    if (key === 'subject' || i === labels.length - 1) {\n      value = rest.slice(valueStart).split('\\n')[0];\n    } else {\n      value = rest.slice(valueStart, labels[i + 1].index);\n    }\n    got[key] = value.replace(/\\s+/g, ' ').replace(/<\\s+/g, '<').replace(/\\s+>/g, '>').trim();\n    if (key === 'subject') break;\n  }\n  return {\n    from: got.from || mail.from,\n    to: got.to || mail.to,\n    subject: got.subject || mail.subject,\n  };\n}\n\n// (The Code node sandbox has no URL class, so the host is read with a pattern.)\nconst hostOf = (u) => {\n  const m = String(u).match(/^https?:\\/\\/(?:[^\\/?#@]*@)?([^\\/?#:]+)/i);\n  return m ? m[1].toLowerCase() : '';\n};\n\nfunction linksOf(html, text, allow) {\n  const urls = new Set();\n  for (const m of (html || '').matchAll(/href\\s*=\\s*[\"']([^\"']+)[\"']/gi)) urls.add(m[1].replace(/&amp;/g, '&'));\n  for (const m of (text || '').matchAll(/https?:\\/\\/[^\\s<>\"')\\]]+/g)) urls.add(m[0]);\n  return [...urls].filter((u) => {\n    const h = hostOf(u);\n    return /^https?:/i.test(u) && allow.some((a) => h === a || h.endsWith('.' + a));\n  });\n}\n\nconst safeName = (s) => s.replace(/[\\\\/:*?\"<>|#%]/g, '_').trim();\n\n// Saved file name. Per-account `statements.filename_template` overrides the default.\n// Tokens: {date} email date YYYY-MM-DD, {year}, {month}, {key} account key, {name}\n// account name, {original} the original file name without its .pdf extension (the\n// email subject for link statements). Keep {original} (or something equally unique)\n// in a template: same-named files replace each other. \".pdf\" is always appended.\nconst DEFAULT_TEMPLATE = '{date}_{key}_{original}';\nfunction nameFor(template, tokens) {\n  const s = safeName(\n    (template || DEFAULT_TEMPLATE).replace(/\\{(\\w+)\\}/g, (m, k) => (k in tokens ? tokens[k] : m)),\n  );\n  return /\\.pdf$/i.test(s) ? s : `${s}.pdf`;\n}\nconst out = [];\n\n// Hourly Gmail Trigger or the manual 'Scan Inbox' - whichever ran in this execution.\nconst emails = ['Gmail Trigger', 'Scan Inbox'].flatMap((n) => {\n  try {\n    return $(n).all();\n  } catch (e) {\n    return [];\n  }\n});\n\nemails.forEach((item, index) => {\n  const j = item.json;\n  const body = j.text || stripTags(j.html || j.textAsHtml || '');\n  const mail0 = unwrapForward(\n    { from: hdr(j.from, j.From), to: hdr(j.to, j.To), subject: j.subject || j.Subject || '' },\n    body,\n  );\n  const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());\n  const day = (isNaN(parsed) ? new Date() : parsed).toISOString().slice(0, 10);\n  const folderOf = (cfg, account) => {\n    const folder = (cfg.onedrive_folder || '').replace(/^\\/+|\\/+$/g, '');\n    if (!folder) throw new Error(`Account ${account} has no onedrive_folder in private-config.json`);\n    return folder;\n  };\n  const pathOf = (folder, fileName) => [...folder.split('/'), fileName].map(encodeURIComponent).join('/');\n\n  let attached = false;\n  for (const bin of Object.values(item.binary || {})) {\n    const original = bin.fileName || 'statement.pdf';\n    const isPdf = bin.mimeType === 'application/pdf' || /\\.pdf$/i.test(original);\n    if (!isPdf) continue;\n\n    const mail = { ...mail0, filename: original };\n    const hit = Object.entries(accounts)\n      .map(([k, a]) => [k, a, score(a.match, mail, false)])\n      .filter((x) => x[2] > 0)\n      .sort((a, b) => b[2] - a[2])[0];\n    if (!hit) continue;\n\n    const [account, cfg] = hit;\n    const folder = folderOf(cfg, account);\n    // Banks reuse the same attachment name every month, so the template carries the date.\n    const fileName = nameFor(cfg.filename_template, {\n      date: day, year: day.slice(0, 4), month: day.slice(5, 7), key: account, name: cfg.name || account,\n      original: safeName(original).replace(/\\.pdf$/i, ''),\n    });\n    attached = true;\n    out.push({\n      json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim() },\n      binary: { data: bin },\n      pairedItem: { item: index },\n    });\n  }\n\n  if (attached) return;\n\n  // No matching attachment: look for accounts whose statement is a download link.\n  const hit = Object.entries(accounts)\n    .filter(([, a]) => a.link && a.link.enabled)\n    .map(([k, a]) => [k, a, score(a.match, mail0, true)])\n    .filter((x) => x[2] > 0)\n    .sort((a, b) => b[2] - a[2])[0];\n  if (!hit) return;\n\n  const [account, cfg] = hit;\n  const urls = linksOf(j.html || j.textAsHtml, j.text, cfg.link.allow_hosts || []).slice(0, MAX_LINKS);\n  if (urls.length === 0) return;\n\n  const folder = folderOf(cfg, account);\n  const fileName = nameFor(cfg.filename_template, {\n    date: day, year: day.slice(0, 4), month: day.slice(5, 7), key: account, name: cfg.name || account,\n    original: safeName(mail0.subject || 'statement'),\n  });\n  out.push({\n    json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },\n    pairedItem: { item: index },\n  });\n});\n\nreturn out;\n"
         }
       },
       {
@@ -65,7 +65,7 @@
         "name": "Decrypt PDF",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
-        "position": [660, 0],
+        "position": [880, 0],
         "onError": "continueErrorOutput",
         "notes": "Sidecar looks up the account's password itself. PDFs that aren't encrypted come back unchanged.",
         "parameters": {
@@ -98,11 +98,11 @@
         "name": "Upload to OneDrive",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
-        "position": [880, -100],
+        "position": [1100, -100],
         "notes": "PUT by path creates missing folders. Same email → same filename → replaced, so re-runs are idempotent.",
         "parameters": {
           "method": "PUT",
-          "url": "=https://graph.microsoft.com/v1.0/me/drive/root:/{{ $('Match Statements').item.json.uploadPath }}:/content",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/root:/{{ $('Fetch Linked PDFs').item.json.uploadPath }}:/content",
           "authentication": "predefinedCredentialType",
           "nodeCredentialType": "microsoftOneDriveOAuth2Api",
           "sendQuery": true,
@@ -131,9 +131,9 @@
         "name": "Decrypt Failed",
         "type": "n8n-nodes-base.stopAndError",
         "typeVersion": 1,
-        "position": [880, 100],
+        "position": [1100, 100],
         "parameters": {
-          "errorMessage": "=Could not decrypt {{ $('Match Statements').item.json.fileName }} for account {{ $('Match Statements').item.json.account }}: {{ $json.error.message || JSON.stringify($json.error) }}"
+          "errorMessage": "=Could not decrypt {{ $('Fetch Linked PDFs').item.json.fileName }} for account {{ $('Fetch Linked PDFs').item.json.account }}: {{ $json.error.message || JSON.stringify($json.error) }}"
         }
       },
       {
@@ -154,7 +154,7 @@
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf newer_than:30d"
+            "q": "{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za} newer_than:30d"
           },
           "options": {
             "downloadAttachments": true
@@ -172,6 +172,17 @@
           }
         },
         "notes": "Manual runs only. Change newer_than:30d to widen/narrow the window. Re-running is safe: uploads use conflictBehavior=replace."
+      },
+      {
+        "parameters": {
+          "jsCode": "// For statements that arrive as a download link: fetch the PDF so the rest of the\n// chain (decrypt -> OneDrive) sees it like an attachment. Other items pass through.\n// Safety: Match only passes links on the account's allowed hosts; here a download\n// is accepted only if it really is a PDF and within the size limit. A link email\n// that yields no PDF fails the run loudly instead of being skipped.\nconst MAX_BYTES = 50 * 1024 * 1024;\n// (The Code node sandbox has no URL class, so the host is read with a pattern.)\nconst hostOf = (u) => {\n  const m = String(u).match(/^https?:\\/\\/(?:[^\\/?#@]*@)?([^\\/?#:]+)/i);\n  return m ? m[1] : '?';\n};\n\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  if (!item.json.viaLink) {\n    out.push({ json: item.json, binary: item.binary, pairedItem: { item: i } });\n    continue;\n  }\n\n  let pdf = null;\n  const tried = [];\n  for (const url of item.json.linkCandidates) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'GET',\n        url,\n        encoding: 'arraybuffer',\n        returnFullResponse: true,\n        ignoreHttpStatusCode: true,\n        timeout: 30000,\n        headers: { 'User-Agent': 'Mozilla/5.0' },\n      });\n      const buf = Buffer.from(res.body);\n      if (res.statusCode === 200 && buf.length <= MAX_BYTES && buf.subarray(0, 5).toString() === '%PDF-') {\n        pdf = buf;\n        break;\n      }\n      tried.push(`${hostOf(url)} -> HTTP ${res.statusCode}, not a usable PDF`);\n    } catch (e) {\n      tried.push(`${hostOf(url)} -> ${e.message}`);\n    }\n  }\n  if (!pdf) {\n    throw new Error(`No PDF found behind any link in \"${item.json.subject}\" for ${item.json.account} (tried: ${tried.join('; ')})`);\n  }\n  const binary = await this.helpers.prepareBinaryData(pdf, item.json.fileName, 'application/pdf');\n  out.push({ json: item.json, binary: { data: binary }, pairedItem: { item: i } });\n}\nreturn out;\n"
+        },
+        "id": "141374fe-1c93-45d0-b187-e49568a425e4",
+        "name": "Fetch Linked PDFs",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [660, 0],
+        "notes": "Downloads the PDF for link-based statements (e.g. ReMax); attachments pass straight through."
       }
     ],
     "connections": {
@@ -201,7 +212,7 @@
         "main": [
           [
             {
-              "node": "Decrypt PDF",
+              "node": "Fetch Linked PDFs",
               "type": "main",
               "index": 0
             }
@@ -242,6 +253,17 @@
           [
             {
               "node": "Get Accounts",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Linked PDFs": {
+        "main": [
+          [
+            {
+              "node": "Decrypt PDF",
               "type": "main",
               "index": 0
             }

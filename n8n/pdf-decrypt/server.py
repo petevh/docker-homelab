@@ -29,7 +29,7 @@ def slug(text):
 
 
 def load_passwords():
-    """{account_key: password} from the separate passwords file; {} if absent."""
+    """{account_key: password or [passwords]} from the separate file; {} if absent."""
     try:
         with open(PASSWORDS_PATH, encoding="utf-8") as f:
             return json.load(f)
@@ -58,6 +58,9 @@ def load_banks():
                 "decryption_password": passwords.get(key, st.get("decryption_password", "")),
                 "onedrive_folder": st.get("onedrive_folder", ""),
                 "match": st.get("match", {}),
+                "link": st.get("link", {}),
+                "filename_template": st.get("filename_template", ""),
+                "name": acct.get("name", ""),
             }
     return out
 
@@ -73,10 +76,22 @@ class DecryptError(Exception):
         self.message = message
 
 
-def decrypt(pdf, password):
-    """Return (pdf_bytes, was_encrypted)."""
+def as_list(passwords):
+    """A password entry may be one string or a list tried in order (never empty)."""
+    if isinstance(passwords, str):
+        passwords = [passwords]
+    return [p for p in passwords if isinstance(p, str)] or [""]
+
+
+def decrypt(pdf, passwords):
+    """Return (pdf_bytes, was_encrypted, index_of_password_that_worked).
+
+    Tries each password in order, so a statement period with a wrong password on
+    file, a rotated password, or alternatives the bank uses all work.
+    """
     if b"%PDF-" not in pdf[:1024]:
         raise DecryptError(400, "not a PDF")
+    candidates = as_list(passwords)
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "in.pdf")
         dst = os.path.join(tmp, "out.pdf")
@@ -86,19 +101,22 @@ def decrypt(pdf, password):
 
         # --is-encrypted: exit 0 = encrypted, 2 = not encrypted
         if qpdf("--is-encrypted", src).returncode != 0:
-            return pdf, False
+            return pdf, False, -1
 
-        # Password goes via a file so it never appears in the process list.
-        with open(pwfile, "w", encoding="utf-8") as f:
-            f.write(password)
-        result = qpdf(f"--password-file={pwfile}", "--decrypt", src, dst)
-        # exit 3 = succeeded with warnings
-        if result.returncode not in (0, 3) or not os.path.exists(dst):
-            if "invalid password" in result.stderr:
-                raise DecryptError(422, "invalid password for this account")
-            raise DecryptError(500, "qpdf failed: " + result.stderr.strip()[-300:])
-        with open(dst, "rb") as f:
-            return f.read(), True
+        for index, password in enumerate(candidates):
+            # Password goes via a file so it never appears in the process list.
+            with open(pwfile, "w", encoding="utf-8") as f:
+                f.write(password)
+            if os.path.exists(dst):
+                os.remove(dst)
+            result = qpdf(f"--password-file={pwfile}", "--decrypt", src, dst)
+            # exit 3 = succeeded with warnings
+            if result.returncode in (0, 3) and os.path.exists(dst):
+                with open(dst, "rb") as f:
+                    return f.read(), True, index
+            if "invalid password" not in result.stderr:
+                raise DecryptError(500, "qpdf failed: " + result.stderr.strip()[-300:])
+        raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -124,6 +142,9 @@ class Handler(BaseHTTPRequestHandler):
                 key: {
                     "match": bank.get("match", {}),
                     "onedrive_folder": bank.get("onedrive_folder", ""),
+                    "link": bank.get("link", {}),
+                    "filename_template": bank.get("filename_template", ""),
+                    "name": bank.get("name", ""),
                 }
                 for key, bank in banks.items()
             })
@@ -145,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
             banks = load_banks()
             if account not in banks:
                 raise DecryptError(404, f"unknown account '{account}'")
-            out, was_encrypted = decrypt(pdf, banks[account].get("decryption_password", ""))
+            out, was_encrypted, used = decrypt(pdf, banks[account].get("decryption_password", ""))
         except DecryptError as e:
             self.send_json(e.status, {"error": e.message, "account": account})
             return
@@ -156,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Length", str(len(out)))
         self.send_header("X-Was-Encrypted", "true" if was_encrypted else "false")
+        # which entry of the account's password list worked (-1: not encrypted)
+        self.send_header("X-Password-Index", str(used))
         self.end_headers()
         self.wfile.write(out)
 

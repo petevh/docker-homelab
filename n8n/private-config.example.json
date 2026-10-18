@@ -1,5 +1,5 @@
 {
-  "_comment": "Subset of the bank-automation v2.0 private-config used by the statements workflow. Copy to private-config.json and fill in real values. NEVER commit private-config.json.",
+  "_comment": "Subset of the bank-automation v2.0 private-config used by the statements workflow. Copy to private-config.json and fill in real values. NEVER commit private-config.json. PDF passwords do not go here: they live in statement-passwords.json ({\"<account key>\": \"password\"}).",
   "banks": {
     "enbd_ae": {
       "accounts": [
@@ -7,13 +7,28 @@
           "name": "ENBD Visa Infinite",
           "key": "enbd_visa_infinite",
           "statements": {
-            "decryption_password": "your-pdf-password-here",
             "onedrive_folder": "Bank Statements/ENBD/CreditCard",
             "match": { "from": "", "to": "", "subject": "", "filename": "^creditcard_.*\\.pdf$" }
           }
         }
       ]
+    },
+    "agent_za": {
+      "accounts": [
+        {
+          "name": "Letting agent",
+          "key": "letting_agent",
+          "statements": {
+            "onedrive_folder": "Property/Agent",
+            "match": [
+              { "from": "agent-mailer.example", "to": "", "subject": "Owner Statement", "filename": "" },
+              { "from": "", "to": "statements+agent@", "subject": "", "filename": "" }
+            ],
+            "link": { "enabled": true, "allow_hosts": ["agent-mailer.example", "sendgrid.net"] }
+          }
+        }
+      ]
     }
   },
-  "_match_help": "match rules route statement emails to an account. All case-insensitive: from/to = substring of sender/recipient, subject/filename = regex. Empty rules are ignored; all non-empty rules must match; an account with no rules never matches. Optional per-account 'key' sets the id used by the sidecar; default is <bank>.<slug(name)>."
+  "_match_help": "match = a rule or a list of rules (any may match). Per rule, all case-insensitive: from/to = substring of sender/recipient, subject/filename = regex. Empty fields are ignored; all non-empty fields must match; a rule with none never matches. Optional per-account 'key' sets the id used by the sidecar; default is <bank>.<slug(name)>. 'link' is for statements emailed as a download link: only links on allow_hosts are followed, and only a real PDF is accepted; filename rules cannot apply to those emails."
 }
