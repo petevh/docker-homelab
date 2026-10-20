@@ -1,0 +1,104 @@
+[
+  {
+    "id": "BankStmtMonthly001",
+    "name": "Bank statements: monthly summary",
+    "active": false,
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 8 1 * *"
+              }
+            ]
+          }
+        },
+        "id": "5d3a7c10-6e2b-4a9f-9c01-000000000001",
+        "name": "First of the Month",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0]
+      },
+      {
+        "parameters": {},
+        "id": "5d3a7c10-6e2b-4a9f-9c01-000000000002",
+        "name": "Manual Run",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [0, 200]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Monthly summary of the statements the workflow filed, from the sidecar's ledger.\n// Runs on the 1st (Schedule Trigger) for the month that just ended, or by hand (Manual Trigger).\n// \"Filed in the month\" means first filed by the workflow in that month (UTC), which is not the\n// statement's own date; re-uploads of an already filed name are not counted again.\nconst now = new Date();\nconst prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));\nconst month = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;\nconst MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];\nconst label = `${MONTHS[prev.getUTCMonth()]} ${prev.getUTCFullYear()}`;\n\nconst res = await this.helpers.httpRequest({ method: 'GET', url: `http://pdf-decrypt:8080/filed?month=${month}`, json: true });\n\nconst byAccount = {};\nfor (const f of res.filed) (byAccount[f.account] = byAccount[f.account] || []).push(f);\nconst nameOf = (key) => (res.accounts[key] && res.accounts[key].name) || key;\n\nconst lines = Object.entries(byAccount).map(([key, files]) =>\n  `${nameOf(key)} (${files.length})\\n` + files.map((f) => `  - ${f.file_name}\\n      -> ${f.folder}`).join('\\n'),\n);\nconst missing = Object.keys(res.accounts).filter((k) => !byAccount[k]).map(nameOf).sort();\n\nconst plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;\nconst parts = [`Statements filed in ${label}: ${plural(res.filed.length, 'file')} for ${plural(Object.keys(byAccount).length, 'account')}.`];\nif (lines.length) parts.push(lines.join('\\n\\n'));\nif (missing.length) {\n  parts.push(\n    `No new statement filed for ${plural(missing.length, 'account')}:\\n` + missing.map((n) => `  - ${n}`).join('\\n') +\n      '\\n(Some accounts are not monthly, or send no statements by email; check the ones you expect.)',\n  );\n}\nreturn [{ json: { subject: `Bank statements: ${label}, ${plural(res.filed.length, 'file')} filed`, body: parts.join('\\n\\n'), month } }];\n"
+        },
+        "id": "5d3a7c10-6e2b-4a9f-9c01-000000000003",
+        "name": "Monthly Summary",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [240, 100]
+      },
+      {
+        "parameters": {
+          "resource": "message",
+          "operation": "send",
+          "sendTo": "pete@vanheerden.ch",
+          "subject": "={{ $json.subject }}",
+          "emailType": "text",
+          "message": "={{ $json.body }}",
+          "options": {}
+        },
+        "id": "5d3a7c10-6e2b-4a9f-9c01-000000000004",
+        "name": "Email Monthly",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2.1,
+        "position": [480, 100],
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "TUkCChxZzPqIzy9d",
+            "name": "Gmail - statements"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "First of the Month": {
+        "main": [
+          [
+            {
+              "node": "Monthly Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Run": {
+        "main": [
+          [
+            {
+              "node": "Monthly Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Monthly Summary": {
+        "main": [
+          [
+            {
+              "node": "Email Monthly",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  }
+]

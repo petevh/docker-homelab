@@ -167,7 +167,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// After a successful upload: remember which OneDrive folder the file landed in, so later\n// uploads address it by id and survive the folder being moved or renamed. Graph's reply\n// to the PUT names the parent folder (id, drive, current path).\n//\n// Records when the upload went by path (first run, or onedrive_folder was changed) and\n// updates the last-seen path when a recorded folder has moved. A folder id set in the\n// config is never touched. Failing to record is not fatal: the file is already filed and\n// the next run simply looks the folder up by path again.\nconst seenPathOf = (ref) => {\n  const m = String(ref.path || '').match(/root:(.*)$/);\n  return m ? m[1].replace(/^\\/+|\\/+$/g, '') : '';\n};\n\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const ref = items[i].json.parentReference || {};\n  const seenPath = seenPathOf(ref);\n  const result = { account: ctx.account, fileName: ctx.fileName, folderSource: ctx.folderSource, recorded: false };\n\n  const moved = ctx.folderSource === 'recorded' && seenPath && seenPath !== ctx.recordedPath;\n  if (moved) result.movedTo = seenPath;\n  if ((ctx.folderSource === 'path' || moved) && ref.id) {\n    try {\n      await this.helpers.httpRequest({\n        method: 'POST',\n        url: `http://pdf-decrypt:8080/folder-id?account=${encodeURIComponent(ctx.account)}`,\n        body: ctx.folderSource === 'path'\n          ? { folder_id: ref.id, drive_id: ref.driveId || '', seen_path: seenPath }\n          : { folder_id: ctx.folderId, drive_id: ctx.driveId, seen_path: seenPath },\n        json: true,\n      });\n      result.recorded = true;\n    } catch (e) {\n      result.recordError = e.message;\n    }\n  }\n  out.push({ json: result, pairedItem: { item: i } });\n}\nreturn out;\n"
+          "jsCode": "// After a successful upload: add the file to the sidecar's ledger of filed statements (feeds the\n// monthly summary and tells Run Summary which files are new), and remember which OneDrive folder\n// it landed in, so later\n// uploads address it by id and survive the folder being moved or renamed. Graph's reply\n// to the PUT names the parent folder (id, drive, current path).\n//\n// Records when the upload went by path (first run, or onedrive_folder was changed) and\n// updates the last-seen path when a recorded folder has moved. A folder id set in the\n// config is never touched. Failing to record is not fatal: the file is already filed and\n// the next run simply looks the folder up by path again.\nconst seenPathOf = (ref) => {\n  const m = String(ref.path || '').match(/root:(.*)$/);\n  return m ? m[1].replace(/^\\/+|\\/+$/g, '') : '';\n};\n\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const ref = items[i].json.parentReference || {};\n  const seenPath = seenPathOf(ref);\n  const result = {\n    account: ctx.account,\n    fileName: ctx.fileName,\n    folder: seenPath || ctx.folder,\n    folderSource: ctx.folderSource,\n    recorded: false,\n    filed: true,\n    isNew: false,\n  };\n\n  const moved = ctx.folderSource === 'recorded' && seenPath && seenPath !== ctx.recordedPath;\n  if (moved) result.movedTo = seenPath;\n  if ((ctx.folderSource === 'path' || moved) && ref.id) {\n    try {\n      await this.helpers.httpRequest({\n        method: 'POST',\n        url: `http://pdf-decrypt:8080/folder-id?account=${encodeURIComponent(ctx.account)}`,\n        body: ctx.folderSource === 'path'\n          ? { folder_id: ref.id, drive_id: ref.driveId || '', seen_path: seenPath }\n          : { folder_id: ctx.folderId, drive_id: ctx.driveId, seen_path: seenPath },\n        json: true,\n      });\n      result.recorded = true;\n    } catch (e) {\n      result.recordError = e.message;\n    }\n  }\n  out.push({ json: result, pairedItem: { item: i } });\n}\n\n// Ledger: one call for the whole run. A failure here only loses the \"new\" flags and the\n// monthly count for these files; the files are filed.\nif (out.length > 0) {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://pdf-decrypt:8080/filed',\n      body: { entries: out.map((o) => ({ account: o.json.account, file_name: o.json.fileName, folder: o.json.folder })) },\n      json: true,\n    });\n    const fresh = new Set(res.new || []);\n    out.forEach((o) => { o.json.isNew = fresh.has(`${o.json.account}|${o.json.fileName}`); });\n  } catch (e) {\n    out.forEach((o) => { o.json.ledgerError = e.message; });\n  }\n}\nreturn out;\n"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-000000000007",
         "name": "Record Folder",
@@ -196,7 +196,7 @@
           "options": {}
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-000000000009",
-        "name": "Email Alert",
+        "name": "Email Summary",
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.1,
         "position": [1980, 0],
@@ -209,13 +209,13 @@
       },
       {
         "parameters": {
-          "errorMessage": "=Some statements were not filed (see the alert email): {{ $('Failure Summary').first().json.body }}"
+          "errorMessage": "=Some statements were not filed (see the alert email): {{ $('Run Summary').first().json.failureText }}"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000a",
         "name": "Run Failed",
         "type": "n8n-nodes-base.stopAndError",
         "typeVersion": 1,
-        "position": [2200, 0]
+        "position": [2420, -80]
       },
       {
         "parameters": {
@@ -239,13 +239,43 @@
       },
       {
         "parameters": {
-          "jsCode": "// Runs once, after everything else: decrypt failures, upload failures and successful\n// uploads all arrive here through the Merge node, which waits for every branch. If any\n// file failed, one item with the text of one alert email goes on to be sent and to fail\n// the run; if nothing failed, nothing continues.\nconst lines = $input.all().map((i) => i.json).filter((j) => j.failure && j.line);\nif (lines.length === 0) return [];\nconst count = lines.length;\nreturn [\n  {\n    json: {\n      subject: `Bank statements: ${count} file${count === 1 ? '' : 's'} not filed`,\n      body: lines.map((j) => j.line).join('\\n\\n'),\n      count,\n    },\n  },\n];\n"
+          "jsCode": "// Runs once, after everything else: successful uploads (Record Folder), upload failures and\n// decrypt failures all arrive here through the Collect Results merge, which waits for every branch.\n//\n// An email is sent when something failed (always) or when this was a manual scan (so the full\n// result of a scan you started is in your inbox). A scheduled/hourly run where everything\n// went fine stays silent; those files show up in the monthly summary instead. Nothing to\n// report (e.g. a scan that matched no statements) stops here.\nconst rows = $input.all().map((i) => i.json);\nconst filed = rows.filter((j) => j.filed).sort((a, b) => (a.account + a.fileName).localeCompare(b.account + b.fileName));\nconst failures = rows.filter((j) => j.failure && j.line);\nconst manual = $('Manual Scan').isExecuted;\nif (failures.length === 0 && !manual) return [];\n\nconst newCount = filed.filter((j) => j.isNew).length;\nconst plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;\nconst head =\n  (manual ? 'Manual scan finished: ' : 'Statement run finished: ') +\n  `${plural(filed.length, 'file')} filed (${newCount} new, ${filed.length - newCount} already filed earlier and replaced)` +\n  (failures.length ? `, ${failures.length} NOT filed.` : '.');\n\nconst parts = [head];\nif (failures.length) parts.push('NOT FILED\\n\\n' + failures.map((j) => j.line).join('\\n\\n'));\nif (filed.length) {\n  parts.push(\n    'FILED\\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\\n    -> ${j.folder}${j.isNew ? '  (new)' : ''}`).join('\\n'),\n  );\n}\nif (filed.some((j) => j.ledgerError)) parts.push('Note: the filed-statements ledger could not be updated, so the monthly summary will miss these files.');\n\nconst subject = failures.length\n  ? `Bank statements: ${plural(failures.length, 'file')} not filed`\n  : `Bank statements: manual scan, ${plural(filed.length, 'file')} filed`;\n\nreturn [\n  {\n    json: {\n      subject,\n      body: parts.join('\\n\\n'),\n      failed: failures.length,\n      failureText: failures.map((j) => j.line).join('\\n\\n'),\n    },\n  },\n];\n"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000d",
-        "name": "Failure Summary",
+        "name": "Run Summary",
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
         "position": [1760, 0]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "any-failures",
+                "leftValue": "={{ $('Run Summary').first().json.failed }}",
+                "rightValue": 0,
+                "operator": {
+                  "type": "number",
+                  "operation": "gt"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000e",
+        "name": "Any Failures?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [2200, 0]
       }
     ],
     "connections": {
@@ -377,25 +407,36 @@
         "main": [
           [
             {
-              "node": "Failure Summary",
+              "node": "Run Summary",
               "type": "main",
               "index": 0
             }
           ]
         ]
       },
-      "Failure Summary": {
+      "Run Summary": {
         "main": [
           [
             {
-              "node": "Email Alert",
+              "node": "Email Summary",
               "type": "main",
               "index": 0
             }
           ]
         ]
       },
-      "Email Alert": {
+      "Email Summary": {
+        "main": [
+          [
+            {
+              "node": "Any Failures?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Any Failures?": {
         "main": [
           [
             {
@@ -403,7 +444,8 @@
               "type": "main",
               "index": 0
             }
-          ]
+          ],
+          []
         ]
       }
     }

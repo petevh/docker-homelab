@@ -18,48 +18,57 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW = ROOT / "workflows" / "bank-statements.json"
-SOURCES = {  # node name -> source file
-    "Match Statements": ROOT / "workflows" / "src" / "match-statements.js",
-    "Fetch Linked PDFs": ROOT / "workflows" / "src" / "fetch-linked-pdfs.js",
-    "Record Folder": ROOT / "workflows" / "src" / "record-folder.js",
-    "Folder Error": ROOT / "workflows" / "src" / "folder-error.js",
-    "Decrypt Error": ROOT / "workflows" / "src" / "decrypt-error.js",
-    "Failure Summary": ROOT / "workflows" / "src" / "failure-summary.js",
+SRC = ROOT / "workflows" / "src"
+WORKFLOWS = {  # workflow file -> {node name -> source file}
+    ROOT / "workflows" / "bank-statements.json": {
+        "Match Statements": SRC / "match-statements.js",
+        "Fetch Linked PDFs": SRC / "fetch-linked-pdfs.js",
+        "Record Folder": SRC / "record-folder.js",
+        "Folder Error": SRC / "folder-error.js",
+        "Decrypt Error": SRC / "decrypt-error.js",
+        "Run Summary": SRC / "run-summary.js",
+    },
+    ROOT / "workflows" / "monthly-summary.json": {
+        "Monthly Summary": SRC / "monthly-summary.js",
+    },
 }
 
 
-def load():
-    raw = WORKFLOW.read_text(encoding="utf-8")
+def load(workflow):
+    raw = workflow.read_text(encoding="utf-8")
     data = json.loads(raw)
     return raw, data, (data[0] if isinstance(data, list) else data)
 
 
-def dump(raw, data):
+def dump(workflow, raw, data):
     out = json.dumps(data, indent=2, ensure_ascii=False)
     out = re.sub(r"\[\s*(-?\d+),\s*(-?\d+)\s*\]", r"[\1, \2]", out)  # keep node positions on one line
-    WORKFLOW.write_text(out + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
+    workflow.write_text(out + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--embed"
-    raw, data, wf = load()
-    nodes = {n["name"]: n for n in wf["nodes"]}
     drift = []
-    for name, path in SOURCES.items():
-        code = nodes[name]["parameters"]["jsCode"]
-        if mode == "--extract":
-            path.write_text(code, encoding="utf-8")
-        elif code != path.read_text(encoding="utf-8"):
-            drift.append(name)
-            nodes[name]["parameters"]["jsCode"] = path.read_text(encoding="utf-8")
+    for workflow, sources in WORKFLOWS.items():
+        raw, data, wf = load(workflow)
+        nodes = {n["name"]: n for n in wf["nodes"]}
+        changed = False
+        for name, path in sources.items():
+            code = nodes[name]["parameters"]["jsCode"]
+            if mode == "--extract":
+                path.write_text(code, encoding="utf-8")
+            elif code != path.read_text(encoding="utf-8"):
+                drift.append(name)
+                nodes[name]["parameters"]["jsCode"] = path.read_text(encoding="utf-8")
+                changed = True
+        if changed and mode == "--embed":
+            dump(workflow, raw, data)
     if mode == "--check":
         print("out of sync: " + ", ".join(drift) if drift else "in sync")
         sys.exit(1 if drift else 0)
     if mode == "--extract":
         print("sources refreshed from the workflow JSON")
     elif drift:
-        dump(raw, data)
         print("embedded: " + ", ".join(drift))
     else:
         print("already in sync")

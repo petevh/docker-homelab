@@ -1,4 +1,6 @@
-// After a successful upload: remember which OneDrive folder the file landed in, so later
+// After a successful upload: add the file to the sidecar's ledger of filed statements (feeds the
+// monthly summary and tells Run Summary which files are new), and remember which OneDrive folder
+// it landed in, so later
 // uploads address it by id and survive the folder being moved or renamed. Graph's reply
 // to the PUT names the parent folder (id, drive, current path).
 //
@@ -17,7 +19,15 @@ for (let i = 0; i < items.length; i++) {
   const ctx = $('Fetch Linked PDFs').itemMatching(i).json;
   const ref = items[i].json.parentReference || {};
   const seenPath = seenPathOf(ref);
-  const result = { account: ctx.account, fileName: ctx.fileName, folderSource: ctx.folderSource, recorded: false };
+  const result = {
+    account: ctx.account,
+    fileName: ctx.fileName,
+    folder: seenPath || ctx.folder,
+    folderSource: ctx.folderSource,
+    recorded: false,
+    filed: true,
+    isNew: false,
+  };
 
   const moved = ctx.folderSource === 'recorded' && seenPath && seenPath !== ctx.recordedPath;
   if (moved) result.movedTo = seenPath;
@@ -37,5 +47,22 @@ for (let i = 0; i < items.length; i++) {
     }
   }
   out.push({ json: result, pairedItem: { item: i } });
+}
+
+// Ledger: one call for the whole run. A failure here only loses the "new" flags and the
+// monthly count for these files; the files are filed.
+if (out.length > 0) {
+  try {
+    const res = await this.helpers.httpRequest({
+      method: 'POST',
+      url: 'http://pdf-decrypt:8080/filed',
+      body: { entries: out.map((o) => ({ account: o.json.account, file_name: o.json.fileName, folder: o.json.folder })) },
+      json: true,
+    });
+    const fresh = new Set(res.new || []);
+    out.forEach((o) => { o.json.isNew = fresh.has(`${o.json.account}|${o.json.fileName}`); });
+  } catch (e) {
+    out.forEach((o) => { o.json.ledgerError = e.message; });
+  }
 }
 return out;

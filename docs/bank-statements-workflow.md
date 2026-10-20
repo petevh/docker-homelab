@@ -30,7 +30,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
                        ▼
                      Record Folder ─────────┤ (remembers the folder id via POST pdf-decrypt:8080/folder-id)
                                             ▼
-   Collect Results → Failure Summary → Email Alert → Run Failed   (one email + failed run, only if something failed)
+   Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed   (one email; run fails only if something failed)
 ```
 
 | Piece | Role |
@@ -41,9 +41,10 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Fetch Linked PDFs** | For statements delivered as a download link: follows the link, keeps only a real PDF. Other items pass through. |
 | **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Error**. |
 | **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=replace`, 3 tries. Credential *Onedrive - Pete*. See 2.6. |
-| **Record Folder** | After a successful upload: record the folder id (and where the folder currently is). |
+| **Record Folder** | After a successful upload: add the file to the ledger (`state/filed-log.json`, via the sidecar's `POST /filed`) and record the folder id (and where the folder currently is). |
 | **Decrypt Error / Folder Error** | One failure line per file that could not be decrypted / uploaded. The rest of the run carries on. |
-| **Collect Results → Failure Summary → Email Alert → Run Failed** | The Merge waits for every branch, so this runs once at the end. If anything failed it sends **one** email (*Gmail - statements* → pete@vanheerden.ch) listing every failed file, then fails the run (red in n8n). Nothing failed: nothing happens. |
+| **Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed** | The Merge waits for every branch, so this runs once at the end. It emails (*Gmail - statements* → pete@vanheerden.ch) when something failed, or after any **manual scan** (full list of what was filed, marked new or replaced, plus failures). A scheduled/hourly run where everything worked sends nothing. If anything failed the run then ends red (**Run Failed**). A scan that matches no statements sends nothing. |
+| **Bank statements: monthly summary** (separate workflow, `workflows/monthly-summary.json`, id `BankStmtMonthly001`) | On the 1st at 08:00 it emails the statements first filed in the previous month, per account, and the accounts that had none. **Manual Run** sends the same for the previous month on demand. Reads the ledger from the sidecar (`GET /filed?month=YYYY-MM`). |
 | **pdf-decrypt sidecar** | qpdf over HTTP. Holds the passwords so they never appear in n8n execution data. Internal only (no Traefik labels), runs read-only as uid 3000. |
 
 n8n itself cannot read the config files (NAS permissions are 770 for `pvh`, n8n runs as uid 1000),
@@ -169,6 +170,15 @@ It uses the *Onedrive - Pete* credential and only reads. Paths are looked up in 
 
 Folder moves and id changes are logged by the sidecar: `docker logs n8n-pdf-decrypt | grep folder`
 (`folder recorded`, `folder moved`, `folder id changed`).
+
+### 2.7 Notifications and the ledger
+- **Failure** (undecryptable file, missing folder id, OneDrive error): one email per run listing every failed file; the run is marked failed.
+- **Manual scan**: always one email with the full result (`17 filed (3 new, 14 replaced)`, each file and its folder).
+- **Normal hourly runs**: silent unless something failed.
+- **Monthly**: the summary workflow, 1st of the month. "Filed in a month" means first filed by the workflow in that
+  month (UTC), not the statement's own date; a re-upload of the same file name is not counted again. The ledger starts
+  when it was introduced, so the first manual scan counts every file in its window as new.
+- The ledger is `bank-automation/state/filed-log.json` (git-ignored with the rest of `state/`; back it up with the config).
 
 ## 3. Passwords
 

@@ -7,6 +7,10 @@ account key, so passwords never show up in n8n execution data.
   GET  /health                 liveness
   GET  /accounts               {key: {match, onedrive_folder, folder_id, drive_id,
                                recorded}} -- no secrets
+  POST /filed                  JSON {entries: [{account, file_name, folder}]}: add the files just
+                               filed to the ledger -> {recorded, new: ["account|file_name", ...]}
+  GET  /filed?month=YYYY-MM    files first filed in that month (UTC) + the account list, for
+                               the monthly summary
   POST /folder-id?account=KEY  JSON {folder_id, drive_id, seen_path}: remember the OneDrive
                                folder id the workflow resolved for the account's
                                current onedrive_folder (state file, see below)
@@ -30,9 +34,16 @@ PASSWORDS_PATH = os.environ.get("PASSWORDS_PATH", "/config/statement-passwords.j
 # updated}}. Lives in its own writable directory (the config is mounted read-only) so
 # the file can be replaced atomically.
 FOLDER_IDS_PATH = os.environ.get("FOLDER_IDS_PATH", "/state/statement-folder-ids.json")
+# Ledger of every file the workflow has filed, {"account|file_name": {account, file_name, folder,
+# first_filed, last_filed, count}}. A re-upload of the same name only bumps last_filed/count,
+# so the monthly summary counts a statement once. Same writable directory as the folder ids.
+FILED_PATH = os.environ.get("FILED_PATH", "/state/filed-log.json")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_BODY = 50 * 1024 * 1024
 MAX_JSON_BODY = 16 * 1024
+MAX_FILED_BODY = 256 * 1024
+MAX_FILED_ENTRIES = 500
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9!_=.$-]{1,256}$")
 state_lock = threading.Lock()
 
@@ -81,14 +92,46 @@ def save_folder_id(account, onedrive_folder, folder_id, drive_id, seen_path):
             "seen_path": seen_path,
             "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        tmp = FOLDER_IDS_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, FOLDER_IDS_PATH)
+        write_json_atomic(FOLDER_IDS_PATH, data)
     return previous
+
+
+def write_json_atomic(path, data):
+    """Write to a temporary file next to `path`, then rename over it: never half-written."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def load_filed():
+    try:
+        with open(FILED_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_filed(entries):
+    """Add files to the ledger; return the keys that had not been filed before."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    new = []
+    with state_lock:
+        data = load_filed()
+        for e in entries:
+            key = f"{e['account']}|{e['file_name']}"
+            old = data.get(key)
+            if old:
+                old.update(last_filed=now, count=old.get("count", 1) + 1, folder=e["folder"] or old.get("folder", ""))
+            else:
+                data[key] = {**e, "first_filed": now, "last_filed": now, "count": 1}
+                new.append(key)
+        write_json_atomic(FILED_PATH, data)
+    return new
 
 
 def load_banks():
@@ -238,11 +281,33 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 for key, bank in banks.items()
             })
+        elif path == "/filed":
+            month = parse_qs(urlparse(self.path).query).get("month", [""])[0]
+            if not MONTH_PATTERN.match(month):
+                self.send_json(400, {"error": "month must be YYYY-MM"})
+                return
+            try:
+                banks = load_banks()
+            except (OSError, ValueError) as e:
+                self.send_json(500, {"error": f"cannot load config: {e}"})
+                return
+            filed = sorted(
+                (e for e in load_filed().values() if str(e.get("first_filed", "")).startswith(month)),
+                key=lambda e: (e["account"], e["first_filed"]),
+            )
+            self.send_json(200, {
+                "month": month,
+                "filed": filed,
+                "accounts": {k: {"name": b.get("name", ""), "onedrive_folder": b.get("onedrive_folder", "")} for k, b in banks.items()},
+            })
         else:
             self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
         url = urlparse(self.path)
+        if url.path == "/filed":
+            self.record_filed_files()
+            return
         if url.path == "/folder-id":
             self.record_folder_id(parse_qs(url.query).get("account", [""])[0])
             return
@@ -275,6 +340,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Password-Index", str(used))
         self.end_headers()
         self.wfile.write(out)
+
+    def record_filed_files(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_FILED_BODY:
+            self.send_json(400, {"error": "bad body size"})
+            return
+        try:
+            raw = json.loads(self.rfile.read(length)).get("entries", [])
+            if not isinstance(raw, list) or len(raw) > MAX_FILED_ENTRIES:
+                raise ValueError("entries must be a list of at most %d" % MAX_FILED_ENTRIES)
+            banks = load_banks()
+            entries = []
+            for e in raw:
+                account, name, folder = e.get("account"), e.get("file_name"), e.get("folder", "")
+                if account not in banks or not isinstance(name, str) or not name or len(name) > 300:
+                    raise ValueError(f"bad entry for account '{account}'")
+                entries.append({"account": account, "file_name": name, "folder": str(folder)[:1024]})
+            new = record_filed(entries)
+        except (AttributeError, TypeError, ValueError) as e:
+            self.send_json(400, {"error": str(e)})
+            return
+        except OSError as e:
+            self.send_json(500, {"error": f"cannot save ledger: {e}"})
+            return
+        self.send_json(200, {"recorded": len(entries), "new": new})
 
     def record_folder_id(self, account):
         length = int(self.headers.get("Content-Length", "0"))
