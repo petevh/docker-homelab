@@ -375,7 +375,7 @@
         "type": "n8n-nodes-base.manualTrigger",
         "typeVersion": 1,
         "position": [0, 440],
-        "notes": "TEMPORARY. Scans pete@'s mailbox for statements. Link the credential on 'Scan Pete' first; afterwards delete that credential and revoke the app in the Google account."
+        "notes": "TEMPORARY. Scans pete@'s mailbox for statements with the existing 'Gmail - pete@vanheerden.ch' credential. Remove that access afterwards if you no longer want n8n to have it."
       },
       {
         "parameters": {
@@ -399,8 +399,8 @@
         "position": [220, 440],
         "credentials": {
           "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - pete (temporary)"
+            "id": "lVnCOPlKkz0LYoHi",
+            "name": "Gmail - pete@vanheerden.ch"
           }
         },
         "notes": "Edit the search (newer_than, limit) to widen or narrow the window. Already-labelled mail (Statements/Filed) is skipped."
@@ -444,12 +444,6 @@
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.1,
         "position": [220, 660],
-        "credentials": {
-          "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - julia (temporary)"
-          }
-        },
         "notes": "Edit the search (newer_than, limit) to widen or narrow the window. Already-labelled mail (Statements/Filed) is skipped."
       },
       {
@@ -743,8 +737,8 @@
         "position": [3300, -1020],
         "credentials": {
           "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - pete (temporary)"
+            "id": "lVnCOPlKkz0LYoHi",
+            "name": "Gmail - pete@vanheerden.ch"
           }
         },
         "onError": "continueRegularOutput"
@@ -764,8 +758,8 @@
         "position": [3520, -1020],
         "credentials": {
           "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - pete (temporary)"
+            "id": "lVnCOPlKkz0LYoHi",
+            "name": "Gmail - pete@vanheerden.ch"
           }
         },
         "executeOnce": true,
@@ -800,8 +794,8 @@
         "position": [3960, -1020],
         "credentials": {
           "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - pete (temporary)"
+            "id": "lVnCOPlKkz0LYoHi",
+            "name": "Gmail - pete@vanheerden.ch"
           }
         },
         "onError": "continueRegularOutput"
@@ -852,8 +846,8 @@
         "position": [4400, -1080],
         "credentials": {
           "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - pete (temporary)"
+            "id": "lVnCOPlKkz0LYoHi",
+            "name": "Gmail - pete@vanheerden.ch"
           }
         },
         "onError": "continueRegularOutput"
@@ -891,12 +885,6 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
         "position": [3300, -1280],
-        "credentials": {
-          "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - julia (temporary)"
-          }
-        },
         "onError": "continueRegularOutput"
       },
       {
@@ -912,12 +900,6 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
         "position": [3520, -1280],
-        "credentials": {
-          "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - julia (temporary)"
-          }
-        },
         "executeOnce": true,
         "onError": "continueRegularOutput"
       },
@@ -948,12 +930,6 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
         "position": [3960, -1280],
-        "credentials": {
-          "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - julia (temporary)"
-          }
-        },
         "onError": "continueRegularOutput"
       },
       {
@@ -1000,12 +976,6 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
         "position": [4400, -1340],
-        "credentials": {
-          "gmailOAuth2": {
-            "id": "",
-            "name": "Gmail - julia (temporary)"
-          }
-        },
         "onError": "continueRegularOutput"
       }
     ],
