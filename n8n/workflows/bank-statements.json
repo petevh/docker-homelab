@@ -381,12 +381,11 @@
         "parameters": {
           "resource": "message",
           "operation": "getAll",
-          "returnAll": false,
-          "limit": 100,
+          "returnAll": true,
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf newer_than:90d -label:statements-filed"
+            "q": "has:attachment filename:pdf newer_than:365d -label:statements-filed"
           },
           "options": {
             "downloadAttachments": true
@@ -429,7 +428,7 @@
           "resource": "message",
           "operation": "getAll",
           "returnAll": false,
-          "limit": 100,
+          "limit": 500,
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
