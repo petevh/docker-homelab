@@ -25,6 +25,12 @@ for (let i = 0; i < items.length; i++) {
         `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +
         `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,
     );
+  } else if (status === 409) {
+    // the pre-check could not see the file, but the name exists: Upload never overwrites
+    lines.push(
+      `${ctx.account}: "${ctx.fileName}" was not filed because a file with that name already exists in the folder ` +
+        `and could not be compared beforehand. It was left alone; if the new one is the right one, delete or rename the old file and run Manual Scan.`,
+    );
   } else if (!status && /timed? ?out|abort|econn|etimedout|enotfound|socket|network|offline/i.test(String(err.message))) {
     // no HTTP answer at all: the connection to OneDrive dropped or timed out (already retried by the node)
     lines.push(

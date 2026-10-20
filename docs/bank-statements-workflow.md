@@ -25,7 +25,9 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
                                ▼
                          Decrypt PDF ──error──► Decrypt Error ─────────────┐
                                ▼              POST pdf-decrypt:8080/decrypt?account=KEY
-                      Upload to OneDrive      (Graph PUT into the folder by id, else by path; replaces same-named file)
+                  Measure → Check Existing → Decide → Needs Upload?   (is a file with this name already in the folder?)
+                               ▼ new                         └ exists: skipped (same size) / flagged (different)
+                      Upload to OneDrive      (Graph PUT into the folder by id, else by path; never overwrites)
                        │            └─error─► Folder Error ──────────────┤
                        ▼
                      Record Folder ─────────┤ (remembers the folder id via POST pdf-decrypt:8080/folder-id)
@@ -40,7 +42,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Match Statements** | Decides which account each PDF belongs to and what to call it. Fetches the account list itself from the sidecar. |
 | **Fetch Linked PDFs** | For statements delivered as a download link: follows the link, keeps only a real PDF. Other items pass through. |
 | **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Error**. |
-| **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=replace`, 3 tries. Credential *Onedrive - Pete*. See 2.6. |
+| **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=fail` (never overwrites), 5 tries 10 s apart. Credential *Onedrive - Pete*. See 2.6. |
 | **Record Folder** | After a successful upload: add the file to the ledger (`state/filed-log.json`, via the sidecar's `POST /filed`) and record the folder id (and where the folder currently is). |
 | **Decrypt Error / Folder Error** | One failure line per file that could not be decrypted / uploaded. The rest of the run carries on. |
 | **Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed** | The Merge waits for every branch, so this runs once at the end. It emails (*Gmail - statements* → pete@vanheerden.ch) when something failed, or after any **manual scan** (full list of what was filed, marked new or replaced, plus failures). A scheduled/hourly run where everything worked sends nothing. If anything failed the run then ends red (**Run Failed**). A scan that matches no statements sends nothing. |
@@ -129,7 +131,7 @@ Per account: `statements.date_source: "email"` forces the email date; `statement
 replaces the whole pattern. Tokens: `{date} {emaildate} {year} {month} {key} {name} {subject} {original}`
 (`{original}` has no extension; `.pdf` is always appended). Use `{subject}` when attachments have generic
 names (`Attachment.pdf`). Keep `{original}` or something equally unique: two files with the same final name
-replace each other. Characters illegal in OneDrive names (`\ / : * ? " < > | # %`) become `_`.
+clash (see 2.8). Characters illegal in OneDrive names (`\ / : * ? " < > | # %`) become `_`.
 
 ### 2.6 Folders and ids (moving or reorganising folders)
 Files are filed by **folder id**, so you can move or rename the folders in OneDrive without touching the
@@ -171,9 +173,25 @@ It uses the *Onedrive - Pete* credential and only reads. Paths are looked up in 
 Folder moves and id changes are logged by the sidecar: `docker logs n8n-pdf-decrypt | grep folder`
 (`folder recorded`, `folder moved`, `folder id changed`).
 
+### 2.8 Files that already exist
+Before each upload the workflow asks OneDrive whether a file with the target name is already in the folder
+(**Measure**: exact byte size of the decrypted PDF; **Check Existing**: Graph lookup by id/path; **Decide**):
+
+| In OneDrive | What happens |
+|---|---|
+| nothing with that name | uploaded (never with overwrite: `conflictBehavior=fail`) |
+| same name, **same size** | **skipped**, listed under SKIPPED in the manual-scan email; not added to the ledger |
+| same name, **different size** | **not filed** and the existing file is left alone: listed as a failure ("already exists with different content, existing N bytes, new M bytes"), alert email, run ends red. If the new one is right, delete or rename the old file and run Manual Scan. |
+| could not check (error) | upload is tried anyway; if the name turns out to exist, Graph refuses (409) and it is reported |
+
+This applies to hourly runs and manual scans alike, so a bank re-sending a statement does not create copies and a
+corrected statement is never silently overwritten or lost. Size, not a hash, is compared (n8n's Code node cannot
+hash); the same statement decrypts to the same bytes. No `(2)` copies are created, because a re-scan would then
+make another copy every time; if you want a corrected statement filed next to the original, rename the old one.
+
 ### 2.7 Notifications and the ledger
 - **Failure** (undecryptable file, missing folder id, OneDrive error): one email per run listing every failed file; the run is marked failed.
-- **Manual scan**: always one email with the full result (`17 filed (3 new, 14 replaced)`, each file and its folder).
+- **Manual scan**: always one email with the full result (`3 filed, 14 skipped`, each file and its folder).
 - **Normal hourly runs**: silent unless something failed.
 - **Monthly**: the summary workflow, 1st of the month. "Filed in a month" means first filed by the workflow in that
   month (UTC), not the statement's own date; a re-upload of the same file name is not counted again. The ledger starts
@@ -221,9 +239,9 @@ container looking at the old inode → `docker compose restart pdf-decrypt`).
 
 ### Running it
 - **Hourly**: published workflow, Gmail Trigger.
-- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Re-running is safe: uploads
-  replace same-named files. A re-scan re-uploads everything in the window, and if naming rules changed
-  since the first upload, the old-named copies stay in OneDrive next to the new ones.
+- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Re-running is safe: files that
+  are already in OneDrive are skipped (2.8), nothing is overwritten. If naming rules changed since the first upload,
+  the files are filed again under the new names and the old-named copies stay next to them.
 
 ### Credentials that expire
 | Credential | Symptom | Cause / fix |

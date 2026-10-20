@@ -85,11 +85,11 @@
         "name": "Upload to OneDrive",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.2,
-        "position": [1100, -100],
+        "position": [1920, -180],
         "notes": "PUT by path creates missing folders. Same email → same filename → replaced, so re-runs are idempotent.",
         "parameters": {
           "method": "PUT",
-          "url": "={{ $('Fetch Linked PDFs').item.json.uploadUrl }}",
+          "url": "={{ $json.uploadUrl }}",
           "authentication": "predefinedCredentialType",
           "nodeCredentialType": "microsoftOneDriveOAuth2Api",
           "sendQuery": true,
@@ -97,7 +97,7 @@
             "parameters": [
               {
                 "name": "@microsoft.graph.conflictBehavior",
-                "value": "replace"
+                "value": "fail"
               }
             ]
           },
@@ -173,17 +173,17 @@
         "name": "Record Folder",
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
-        "position": [1320, -160]
+        "position": [2140, -260]
       },
       {
         "parameters": {
-          "jsCode": "// Upload failures, one input item per failed file (the error output of Upload to OneDrive).\n// Turned into one failure line each; Failure Summary collects them with the decrypt failures,\n// so a moved folder produces one mail and one failure at the end of the run, not one per file.\n//\n// 404/410 on a folder id (from the config or recorded earlier) means the folder is gone:\n// never silently recreate the path, tell the user which account, id and path. Other errors\n// (401/403 access, 429/5xx service) are reported as such; no recorded id is ever cleared\n// because of them.\nconst lines = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const err = items[i].json.error || items[i].json;\n  // the HTTP node does not always carry a status code, so fall back to the message text\n  const status =\n    Number(err.httpCode) ||\n    Number((String(err.message).match(/\\b([45]\\d{2})\\b/) || [])[1]) ||\n    (/could not be found|not found/i.test(String(err.message)) ? 404 : 0);\n  const gone = ctx.folderSource !== 'path' && (status === 404 || status === 410);\n  if (gone) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The ${ctx.folderSource === 'config' ? 'configured folder_id' : 'recorded folder id'} ` +\n        `${ctx.folderId} no longer exists (HTTP ${status}). Configured path: ${ctx.folder}. ` +\n        `Last known location: ${ctx.recordedPath || 'unknown'}. ` +\n        `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +\n        `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,\n    );\n  } else if (!status && /timed? ?out|abort|econn|etimedout|enotfound|socket|network|offline/i.test(String(err.message))) {\n    // no HTTP answer at all: the connection to OneDrive dropped or timed out (already retried by the node)\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The connection to OneDrive failed (${err.message}). ` +\n        `This is usually a temporary network or OneDrive problem, not a missing folder: run Manual Scan again, ` +\n        `and look closer only if the same file fails twice.`,\n    );\n  } else if (status === 429 || status >= 500) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `OneDrive is throttling or having trouble, which is usually temporary: run Manual Scan again.`,\n    );\n  } else {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status || 'an error'} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `This is an access problem, not a missing folder. Check the OneDrive credential and the folder's sharing, then run Manual Scan.`,\n    );\n  }\n}\nfunction folderWhere(ctx) {\n  return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;\n}\nreturn lines.map((line, i) => ({ json: { failure: 'folder', line }, pairedItem: { item: i } }));\n"
+          "jsCode": "// Upload failures, one input item per failed file (the error output of Upload to OneDrive).\n// Turned into one failure line each; Failure Summary collects them with the decrypt failures,\n// so a moved folder produces one mail and one failure at the end of the run, not one per file.\n//\n// 404/410 on a folder id (from the config or recorded earlier) means the folder is gone:\n// never silently recreate the path, tell the user which account, id and path. Other errors\n// (401/403 access, 429/5xx service) are reported as such; no recorded id is ever cleared\n// because of them.\nconst lines = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const err = items[i].json.error || items[i].json;\n  // the HTTP node does not always carry a status code, so fall back to the message text\n  const status =\n    Number(err.httpCode) ||\n    Number((String(err.message).match(/\\b([45]\\d{2})\\b/) || [])[1]) ||\n    (/could not be found|not found/i.test(String(err.message)) ? 404 : 0);\n  const gone = ctx.folderSource !== 'path' && (status === 404 || status === 410);\n  if (gone) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The ${ctx.folderSource === 'config' ? 'configured folder_id' : 'recorded folder id'} ` +\n        `${ctx.folderId} no longer exists (HTTP ${status}). Configured path: ${ctx.folder}. ` +\n        `Last known location: ${ctx.recordedPath || 'unknown'}. ` +\n        `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +\n        `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,\n    );\n  } else if (status === 409) {\n    // the pre-check could not see the file, but the name exists: Upload never overwrites\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed because a file with that name already exists in the folder ` +\n        `and could not be compared beforehand. It was left alone; if the new one is the right one, delete or rename the old file and run Manual Scan.`,\n    );\n  } else if (!status && /timed? ?out|abort|econn|etimedout|enotfound|socket|network|offline/i.test(String(err.message))) {\n    // no HTTP answer at all: the connection to OneDrive dropped or timed out (already retried by the node)\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The connection to OneDrive failed (${err.message}). ` +\n        `This is usually a temporary network or OneDrive problem, not a missing folder: run Manual Scan again, ` +\n        `and look closer only if the same file fails twice.`,\n    );\n  } else if (status === 429 || status >= 500) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `OneDrive is throttling or having trouble, which is usually temporary: run Manual Scan again.`,\n    );\n  } else {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status || 'an error'} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `This is an access problem, not a missing folder. Check the OneDrive credential and the folder's sharing, then run Manual Scan.`,\n    );\n  }\n}\nfunction folderWhere(ctx) {\n  return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;\n}\nreturn lines.map((line, i) => ({ json: { failure: 'folder', line }, pairedItem: { item: i } }));\n"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-000000000008",
         "name": "Folder Error",
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
-        "position": [1320, 20]
+        "position": [2140, -100]
       },
       {
         "parameters": {
@@ -199,7 +199,7 @@
         "name": "Email Summary",
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.1,
-        "position": [1980, 0],
+        "position": [2840, 0],
         "credentials": {
           "gmailOAuth2": {
             "id": "TUkCChxZzPqIzy9d",
@@ -215,7 +215,7 @@
         "name": "Run Failed",
         "type": "n8n-nodes-base.stopAndError",
         "typeVersion": 1,
-        "position": [2420, -80]
+        "position": [3280, -80]
       },
       {
         "parameters": {
@@ -225,27 +225,27 @@
         "name": "Decrypt Error",
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
-        "position": [1320, 220]
+        "position": [1300, 260]
       },
       {
         "parameters": {
-          "numberInputs": 3
+          "numberInputs": 4
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000c",
         "name": "Collect Results",
         "type": "n8n-nodes-base.merge",
         "typeVersion": 3,
-        "position": [1540, 0]
+        "position": [2400, 0]
       },
       {
         "parameters": {
-          "jsCode": "// Runs once, after everything else: successful uploads (Record Folder), upload failures and\n// decrypt failures all arrive here through the Collect Results merge, which waits for every branch.\n//\n// An email is sent when something failed (always) or when this was a manual scan (so the full\n// result of a scan you started is in your inbox). A scheduled/hourly run where everything\n// went fine stays silent; those files show up in the monthly summary instead. Nothing to\n// report (e.g. a scan that matched no statements) stops here.\nconst rows = $input.all().map((i) => i.json);\nconst filed = rows.filter((j) => j.filed).sort((a, b) => (a.account + a.fileName).localeCompare(b.account + b.fileName));\nconst failures = rows.filter((j) => j.failure && j.line);\nconst manual = $('Manual Scan').isExecuted;\nif (failures.length === 0 && !manual) return [];\n\nconst newCount = filed.filter((j) => j.isNew).length;\nconst plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;\nconst head =\n  (manual ? 'Manual scan finished: ' : 'Statement run finished: ') +\n  `${plural(filed.length, 'file')} filed (${newCount} new, ${filed.length - newCount} already filed earlier and replaced)` +\n  (failures.length ? `, ${failures.length} NOT filed.` : '.');\n\nconst parts = [head];\nif (failures.length) parts.push('NOT FILED\\n\\n' + failures.map((j) => j.line).join('\\n\\n'));\nif (filed.length) {\n  parts.push(\n    'FILED\\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\\n    -> ${j.folder}${j.isNew ? '  (new)' : ''}`).join('\\n'),\n  );\n}\nif (filed.some((j) => j.ledgerError)) parts.push('Note: the filed-statements ledger could not be updated, so the monthly summary will miss these files.');\n\nconst subject = failures.length\n  ? `Bank statements: ${plural(failures.length, 'file')} not filed`\n  : `Bank statements: manual scan, ${plural(filed.length, 'file')} filed`;\n\nreturn [\n  {\n    json: {\n      subject,\n      body: parts.join('\\n\\n'),\n      failed: failures.length,\n      failureText: failures.map((j) => j.line).join('\\n\\n'),\n    },\n  },\n];\n"
+          "jsCode": "// Runs once, after everything else: files filed (Record Folder), files skipped because they were\n// already in OneDrive, upload and decrypt failures, and files that clash with a different file of\n// the same name all arrive here through the Collect Results merge, which waits for every branch.\n//\n// An email is sent when something failed (always) or when this was a manual scan (so the full\n// result of a scan you started is in your inbox). A scheduled/hourly run where everything went\n// fine stays silent; the files it filed show up in the monthly summary. Nothing to report\n// (e.g. a scan that matched no statements) stops here.\nconst rows = $input.all().map((i) => i.json);\nconst byName = (a, b) => (a.account + a.fileName).localeCompare(b.account + b.fileName);\nconst filed = rows.filter((j) => j.filed).sort(byName);\nconst skipped = rows.filter((j) => j.skipped).sort(byName);\nconst failures = rows.filter((j) => j.failure && j.line);\nconst manual = $('Manual Scan').isExecuted;\nif (failures.length === 0 && !manual) return [];\n\nconst plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;\nconst head =\n  (manual ? 'Manual scan finished: ' : 'Statement run finished: ') +\n  `${plural(filed.length, 'file')} filed, ${skipped.length} skipped (already in OneDrive)` +\n  (failures.length ? `, ${failures.length} NOT filed.` : '.');\n\nconst parts = [head];\nif (failures.length) parts.push('NOT FILED\\n\\n' + failures.map((j) => j.line).join('\\n\\n'));\nif (filed.length) parts.push('FILED\\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\\n    -> ${j.folder}`).join('\\n'));\nif (skipped.length) {\n  parts.push('SKIPPED (identical file already in the folder)\\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}`).join('\\n'));\n}\nif (filed.some((j) => j.ledgerError)) parts.push('Note: the filed-statements ledger could not be updated, so the monthly summary will miss these files.');\n\nconst subject = failures.length\n  ? `Bank statements: ${plural(failures.length, 'file')} not filed`\n  : `Bank statements: manual scan, ${filed.length} filed, ${skipped.length} skipped`;\n\nreturn [\n  {\n    json: {\n      subject,\n      body: parts.join('\\n\\n'),\n      failed: failures.length,\n      failureText: failures.map((j) => j.line).join('\\n\\n'),\n    },\n  },\n];\n"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000d",
         "name": "Run Summary",
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
-        "position": [1760, 0]
+        "position": [2620, 0]
       },
       {
         "parameters": {
@@ -275,7 +275,98 @@
         "name": "Any Failures?",
         "type": "n8n-nodes-base.if",
         "typeVersion": 2.2,
-        "position": [2200, 0]
+        "position": [3060, 0]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Before filing: the exact size of each decrypted PDF, and the URL that says whether a file with\n// the target name is already in OneDrive (Check Existing asks Graph for it). The binary is passed\n// on, because the HTTP node that follows drops it.\nconst items = $input.all();\nconst out = [];\nfor (let i = 0; i < items.length; i++) {\n  const bytes = await this.helpers.getBinaryDataBuffer(i, 'data');\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  out.push({\n    json: { decryptedSize: bytes.length, checkUrl: ctx.uploadUrl.replace(/:\\/content$/, '') },\n    binary: items[i].binary,\n    pairedItem: { item: i },\n  });\n}\nreturn out;\n"
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-000000000010",
+        "name": "Measure",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1100, -100]
+      },
+      {
+        "parameters": {
+          "url": "={{ $json.checkUrl }}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "$select",
+                "value": "id,name,size,file,folder,parentReference"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true,
+                "responseFormat": "json"
+              }
+            }
+          }
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-000000000011",
+        "name": "Check Existing",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1300, -100],
+        "onError": "continueRegularOutput",
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000,
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "// Per file, after Check Existing asked Graph about the target name:\n//   404                         -> not there yet: upload it (Upload uses conflictBehavior=fail, so it\n//                                  can never overwrite anything)\n//   200, same size              -> already filed: skip (listed as skipped in the summary)\n//   200, different size         -> a DIFFERENT file with this name exists: do not overwrite, do not\n//                                  guess; report it as a failure so you decide (delete or rename the\n//                                  old one, then Manual Scan)\n//   anything else / no answer   -> could not check: try the upload anyway; if the name exists after\n//                                  all, Graph refuses (409) and that is reported\n// Size is compared because the Code node cannot hash files; the same statement decrypts to the same\n// bytes, so an identical statement has an identical size.\nconst items = $input.all();\nconst out = [];\nfor (let i = 0; i < items.length; i++) {\n  const m = $('Measure').itemMatching(i);\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const res = items[i].json;\n  const status = Number(res.statusCode) || 0;\n  const body = res.body && typeof res.body === 'object' ? res.body : {};\n  const decryptedSize = m.json.decryptedSize;\n  const base = { ...ctx, decryptedSize };\n  const paired = { item: i };\n\n  if (status === 200 && body.file) {\n    if (body.size === decryptedSize) {\n      out.push({ json: { ...base, action: 'skip', skipped: true, existingSize: body.size }, binary: m.binary, pairedItem: paired });\n    } else {\n      out.push({\n        json: {\n          ...base,\n          action: 'conflict',\n          failure: 'exists-different',\n          line:\n            `${ctx.account}: \"${ctx.fileName}\" already exists in OneDrive (${ctx.folder}) with different content ` +\n            `(existing ${body.size} bytes, new ${decryptedSize} bytes), so the new file was NOT filed and the existing one was left alone. ` +\n            `If the new one is the right one, delete or rename the old file in OneDrive and run Manual Scan.`,\n        },\n        pairedItem: paired,\n      });\n    }\n  } else {\n    out.push({ json: { ...base, action: status === 404 ? 'new' : 'unchecked' }, binary: m.binary, pairedItem: paired });\n  }\n}\nreturn out;\n"
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-000000000012",
+        "name": "Decide",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1500, -100]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "needs-upload",
+                "leftValue": "={{ $json.action === 'new' || $json.action === 'unchecked' }}",
+                "rightValue": "",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-000000000013",
+        "name": "Needs Upload?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [1700, -100]
       }
     ],
     "connections": {
@@ -305,7 +396,7 @@
         "main": [
           [
             {
-              "node": "Upload to OneDrive",
+              "node": "Measure",
               "type": "main",
               "index": 0
             }
@@ -446,6 +537,57 @@
             }
           ],
           []
+        ]
+      },
+      "Measure": {
+        "main": [
+          [
+            {
+              "node": "Check Existing",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Existing": {
+        "main": [
+          [
+            {
+              "node": "Decide",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decide": {
+        "main": [
+          [
+            {
+              "node": "Needs Upload?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Needs Upload?": {
+        "main": [
+          [
+            {
+              "node": "Upload to OneDrive",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Collect Results",
+              "type": "main",
+              "index": 3
+            }
+          ]
         ]
       }
     }

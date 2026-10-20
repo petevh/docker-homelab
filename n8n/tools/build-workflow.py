@@ -23,6 +23,8 @@ WORKFLOWS = {  # workflow file -> {node name -> source file}
     ROOT / "workflows" / "bank-statements.json": {
         "Match Statements": SRC / "match-statements.js",
         "Fetch Linked PDFs": SRC / "fetch-linked-pdfs.js",
+        "Measure": SRC / "measure-upload.js",
+        "Decide": SRC / "decide-existing.js",
         "Record Folder": SRC / "record-folder.js",
         "Folder Error": SRC / "folder-error.js",
         "Decrypt Error": SRC / "decrypt-error.js",
