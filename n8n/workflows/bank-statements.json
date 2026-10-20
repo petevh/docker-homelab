@@ -433,7 +433,7 @@
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf newer_than:90d -label:statements-filed"
+            "q": "has:attachment filename:pdf newer_than:180d -label:statements-filed"
           },
           "options": {
             "downloadAttachments": true
