@@ -23,12 +23,14 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
                                ▼
                        Fetch Linked PDFs      (only for "link" statements, e.g. ReMax)
                                ▼
-                         Decrypt PDF ──error──► Decrypt Failed (stops the run, names the file)
+                         Decrypt PDF ──error──► Decrypt Error ─────────────┐
                                ▼              POST pdf-decrypt:8080/decrypt?account=KEY
                       Upload to OneDrive      (Graph PUT into the folder by id, else by path; replaces same-named file)
-                       │            └─error─► Folder Error → Email Folder Alert → Folder Failed (after the rest of the run)
+                       │            └─error─► Folder Error ──────────────┤
                        ▼
-                     Record Folder            (remembers the folder id via POST pdf-decrypt:8080/folder-id)
+                     Record Folder ─────────┤ (remembers the folder id via POST pdf-decrypt:8080/folder-id)
+                                            ▼
+   Collect Results → Failure Summary → Email Alert → Run Failed   (one email + failed run, only if something failed)
 ```
 
 | Piece | Role |
@@ -37,9 +39,11 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Manual Scan / Scan Inbox** | Same query plus `newer_than:30d`, up to 100 emails. Works whether or not the workflow is published. Edit `newer_than` to widen the window. |
 | **Match Statements** | Decides which account each PDF belongs to and what to call it. Fetches the account list itself from the sidecar. |
 | **Fetch Linked PDFs** | For statements delivered as a download link: follows the link, keeps only a real PDF. Other items pass through. |
-| **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Failed**. |
+| **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Error**. |
 | **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=replace`, 3 tries. Credential *Onedrive - Pete*. See 2.6. |
-| **Record Folder / Folder Error** | After the upload: record the folder id (and where the folder currently is); or, on failure, build one alert, email it (*Gmail - statements* sends to pete@vanheerden.ch) and fail the run at the end. |
+| **Record Folder** | After a successful upload: record the folder id (and where the folder currently is). |
+| **Decrypt Error / Folder Error** | One failure line per file that could not be decrypted / uploaded. The rest of the run carries on. |
+| **Collect Results → Failure Summary → Email Alert → Run Failed** | The Merge waits for every branch, so this runs once at the end. If anything failed it sends **one** email (*Gmail - statements* → pete@vanheerden.ch) listing every failed file, then fails the run (red in n8n). Nothing failed: nothing happens. |
 | **pdf-decrypt sidecar** | qpdf over HTTP. Holds the passwords so they never appear in n8n execution data. Internal only (no Traefik labels), runs read-only as uid 3000. |
 
 n8n itself cannot read the config files (NAS permissions are 770 for `pvh`, n8n runs as uid 1000),
@@ -98,8 +102,9 @@ The sidecar tries, in order:
    password even when none would have worked.
 2. Each password for that account from `statement-passwords.json`, in list order.
 
-If none works: HTTP 422 `invalid password for this account (tried N)` → **Decrypt Failed**, and the
-**whole run stops** at that file. Fix the password (or pause the account's rule) and re-run.
+If none works: HTTP 422 `invalid password for this account (tried N)` → **Decrypt Error**. That file is not
+filed and you get an alert email; the other files in the run are still processed and the run ends marked failed.
+Fix the password (or pause the account's rule), then run Manual Scan.
 Unencrypted PDFs pass through unchanged.
 
 Response header `X-Password-Index`: `-1` not encrypted, `-2` encrypted but needed no password,
@@ -245,7 +250,7 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
 | Statement not filed, listed under "NOT MATCHED" | No rule for that sender, or the rule's `filename` doesn't match what n8n reports (note the `/` truncation). |
 | Forwarded mail not matched | Sender not in `TRUSTED_FORWARDERS`, or Google's authentication header didn't show an aligned pass, or the mail has no `Authentication-Results` (forwards must arrive through Gmail). |
 | Link statement not fetched | Account lacks `link.enabled`, link host not in `allow_hosts`, or the response wasn't a PDF (the error lists each attempt). |
-| Run stops with `invalid password … (tried N)` | Missing/wrong password for that account. All later files in the run are skipped until fixed. |
+| Alert email: `could not be decrypted … (tried N)` | Missing/wrong password for that account. Only that file is skipped; fix `statement-passwords.json`, then Manual Scan. |
 | Zero matches although emails arrive | Check the sidecar is up (`docker ps`) — Match fetches `/accounts` itself and fails loudly if it can't. |
 | `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). A 404 on a folder id: see 2.6. |
 | Sidecar can't read config | The bind mount points at a replaced file → restart `pdf-decrypt`. |
@@ -273,7 +278,6 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
   `private-config*.json` (except the template) and the passwords file are ignored.
 
 ## 8. Known limitations
-- A decrypt failure stops the whole run (the rest of that run's files are not processed).
 - Unmatched mail is skipped without a notification.
 - Only the three kinds of Discovery mail seen so far are configured; new senders need a rule.
 - Statement contents are not parsed yet (needed for the YNAB import and the medical-claims web app).

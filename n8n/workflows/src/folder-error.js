@@ -1,6 +1,6 @@
 // Upload failures, one input item per failed file (the error output of Upload to OneDrive).
-// Collapsed into a single item with the text of one alert email, so a moved folder produces
-// one mail and one failure at the end of the run instead of one per file.
+// Turned into one failure line each; Failure Summary collects them with the decrypt failures,
+// so a moved folder produces one mail and one failure at the end of the run, not one per file.
 //
 // 404/410 on a folder id (from the config or recorded earlier) means the folder is gone:
 // never silently recreate the path, tell the user which account, id and path. Other errors
@@ -35,13 +35,4 @@ for (let i = 0; i < items.length; i++) {
 function folderWhere(ctx) {
   return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;
 }
-const count = lines.length;
-return [
-  {
-    json: {
-      subject: `Bank statements: ${count} file${count === 1 ? '' : 's'} not filed`,
-      body: lines.join('\n\n'),
-      count,
-    },
-  },
-];
+return lines.map((line, i) => ({ json: { failure: 'folder', line }, pairedItem: { item: i } }));

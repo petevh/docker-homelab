@@ -118,16 +118,6 @@
         "waitBetweenTries": 2000
       },
       {
-        "id": "0b6f2a10-5f0e-4c7e-9a11-000000000006",
-        "name": "Decrypt Failed",
-        "type": "n8n-nodes-base.stopAndError",
-        "typeVersion": 1,
-        "position": [1100, 100],
-        "parameters": {
-          "errorMessage": "=Could not decrypt {{ $('Fetch Linked PDFs').item.json.fileName }} for account {{ $('Fetch Linked PDFs').item.json.account }}: {{ $json.error.message || JSON.stringify($json.error) }}"
-        }
-      },
-      {
         "parameters": {},
         "id": "f3ad9e70-21ba-4a0a-b2d9-8d68d9ca15e2",
         "name": "Manual Scan",
@@ -187,7 +177,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Upload failures, one input item per failed file (the error output of Upload to OneDrive).\n// Collapsed into a single item with the text of one alert email, so a moved folder produces\n// one mail and one failure at the end of the run instead of one per file.\n//\n// 404/410 on a folder id (from the config or recorded earlier) means the folder is gone:\n// never silently recreate the path, tell the user which account, id and path. Other errors\n// (401/403 access, 429/5xx service) are reported as such; no recorded id is ever cleared\n// because of them.\nconst lines = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const err = items[i].json.error || items[i].json;\n  // the HTTP node does not always carry a status code, so fall back to the message text\n  const status =\n    Number(err.httpCode) ||\n    Number((String(err.message).match(/\\b([45]\\d{2})\\b/) || [])[1]) ||\n    (/could not be found|not found/i.test(String(err.message)) ? 404 : 0);\n  const gone = ctx.folderSource !== 'path' && (status === 404 || status === 410);\n  if (gone) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The ${ctx.folderSource === 'config' ? 'configured folder_id' : 'recorded folder id'} ` +\n        `${ctx.folderId} no longer exists (HTTP ${status}). Configured path: ${ctx.folder}. ` +\n        `Last known location: ${ctx.recordedPath || 'unknown'}. ` +\n        `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +\n        `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,\n    );\n  } else {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status || 'an error'} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `This is an access or service problem, not a missing folder. Run Manual Scan once it is fixed.`,\n    );\n  }\n}\nfunction folderWhere(ctx) {\n  return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;\n}\nconst count = lines.length;\nreturn [\n  {\n    json: {\n      subject: `Bank statements: ${count} file${count === 1 ? '' : 's'} not filed`,\n      body: lines.join('\\n\\n'),\n      count,\n    },\n  },\n];\n"
+          "jsCode": "// Upload failures, one input item per failed file (the error output of Upload to OneDrive).\n// Turned into one failure line each; Failure Summary collects them with the decrypt failures,\n// so a moved folder produces one mail and one failure at the end of the run, not one per file.\n//\n// 404/410 on a folder id (from the config or recorded earlier) means the folder is gone:\n// never silently recreate the path, tell the user which account, id and path. Other errors\n// (401/403 access, 429/5xx service) are reported as such; no recorded id is ever cleared\n// because of them.\nconst lines = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const err = items[i].json.error || items[i].json;\n  // the HTTP node does not always carry a status code, so fall back to the message text\n  const status =\n    Number(err.httpCode) ||\n    Number((String(err.message).match(/\\b([45]\\d{2})\\b/) || [])[1]) ||\n    (/could not be found|not found/i.test(String(err.message)) ? 404 : 0);\n  const gone = ctx.folderSource !== 'path' && (status === 404 || status === 410);\n  if (gone) {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. The ${ctx.folderSource === 'config' ? 'configured folder_id' : 'recorded folder id'} ` +\n        `${ctx.folderId} no longer exists (HTTP ${status}). Configured path: ${ctx.folder}. ` +\n        `Last known location: ${ctx.recordedPath || 'unknown'}. ` +\n        `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +\n        `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,\n    );\n  } else {\n    lines.push(\n      `${ctx.account}: \"${ctx.fileName}\" was not filed. OneDrive returned ${status || 'an error'} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +\n        `This is an access or service problem, not a missing folder. Run Manual Scan once it is fixed.`,\n    );\n  }\n}\nfunction folderWhere(ctx) {\n  return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;\n}\nreturn lines.map((line, i) => ({ json: { failure: 'folder', line }, pairedItem: { item: i } }));\n"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-000000000008",
         "name": "Folder Error",
@@ -206,10 +196,10 @@
           "options": {}
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-000000000009",
-        "name": "Email Folder Alert",
+        "name": "Email Alert",
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.1,
-        "position": [1540, 20],
+        "position": [1980, 0],
         "credentials": {
           "gmailOAuth2": {
             "id": "TUkCChxZzPqIzy9d",
@@ -219,13 +209,43 @@
       },
       {
         "parameters": {
-          "errorMessage": "=Some statements were not filed (see the alert email): {{ $('Folder Error').first().json.body }}"
+          "errorMessage": "=Some statements were not filed (see the alert email): {{ $('Failure Summary').first().json.body }}"
         },
         "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000a",
-        "name": "Folder Failed",
+        "name": "Run Failed",
         "type": "n8n-nodes-base.stopAndError",
         "typeVersion": 1,
-        "position": [1760, 20]
+        "position": [2200, 0]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Decrypt failures, one input item per failed file (the error output of Decrypt PDF).\n// Turned into one failure line each; Failure Summary collects them with the upload\n// failures and sends a single alert, so one bad password no longer stops the rest of the run.\n// The sidecar's message names the account and says how many passwords it tried; it never\n// contains a password.\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;\n  const err = items[i].json.error || items[i].json;\n  const why = err.description || err.message || JSON.stringify(err);\n  out.push({\n    json: {\n      failure: 'decrypt',\n      line:\n        `${ctx.account}: \"${ctx.fileName}\" could not be decrypted and was not filed: ${why}. ` +\n        `Check this account's entry in statement-passwords.json (missing, wrong or changed password), ` +\n        `then run Manual Scan (re-uploads replace same-named files).`,\n    },\n    pairedItem: { item: i },\n  });\n}\nreturn out;\n"
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000b",
+        "name": "Decrypt Error",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1320, 220]
+      },
+      {
+        "parameters": {
+          "numberInputs": 3
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000c",
+        "name": "Collect Results",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [1540, 0]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Runs once, after everything else: decrypt failures, upload failures and successful\n// uploads all arrive here through the Merge node, which waits for every branch. If any\n// file failed, one item with the text of one alert email goes on to be sent and to fail\n// the run; if nothing failed, nothing continues.\nconst lines = $input.all().map((i) => i.json).filter((j) => j.failure && j.line);\nif (lines.length === 0) return [];\nconst count = lines.length;\nreturn [\n  {\n    json: {\n      subject: `Bank statements: ${count} file${count === 1 ? '' : 's'} not filed`,\n      body: lines.map((j) => j.line).join('\\n\\n'),\n      count,\n    },\n  },\n];\n"
+        },
+        "id": "7c1d2e40-8a51-4b6e-b0c4-00000000000d",
+        "name": "Failure Summary",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1760, 0]
       }
     ],
     "connections": {
@@ -262,7 +282,7 @@
           ],
           [
             {
-              "node": "Decrypt Failed",
+              "node": "Decrypt Error",
               "type": "main",
               "index": 0
             }
@@ -320,22 +340,66 @@
           ]
         ]
       },
-      "Folder Error": {
+      "Record Folder": {
         "main": [
           [
             {
-              "node": "Email Folder Alert",
+              "node": "Collect Results",
               "type": "main",
               "index": 0
             }
           ]
         ]
       },
-      "Email Folder Alert": {
+      "Folder Error": {
         "main": [
           [
             {
-              "node": "Folder Failed",
+              "node": "Collect Results",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Decrypt Error": {
+        "main": [
+          [
+            {
+              "node": "Collect Results",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Collect Results": {
+        "main": [
+          [
+            {
+              "node": "Failure Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Failure Summary": {
+        "main": [
+          [
+            {
+              "node": "Email Alert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Email Alert": {
+        "main": [
+          [
+            {
+              "node": "Run Failed",
               "type": "main",
               "index": 0
             }

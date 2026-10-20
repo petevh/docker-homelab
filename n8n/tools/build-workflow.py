@@ -24,6 +24,8 @@ SOURCES = {  # node name -> source file
     "Fetch Linked PDFs": ROOT / "workflows" / "src" / "fetch-linked-pdfs.js",
     "Record Folder": ROOT / "workflows" / "src" / "record-folder.js",
     "Folder Error": ROOT / "workflows" / "src" / "folder-error.js",
+    "Decrypt Error": ROOT / "workflows" / "src" / "decrypt-error.js",
+    "Failure Summary": ROOT / "workflows" / "src" / "failure-summary.js",
 }
 
 
