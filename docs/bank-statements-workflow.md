@@ -59,6 +59,11 @@ which is why the sidecar serves the account list.
 Each account has `statements.match`: one rule `{from, to, subject, filename}` or a **list** of rules.
 
 - `from`, `to`: case-insensitive *substring* of the sender / the To header.
+- `label`: a Gmail label on the email, whole name, case-insensitive (e.g. `Rob`). For mail that nothing in the headers
+  can tell apart (FNB credit-card statements for two people sent to one address). The scan paths of **Manual Scan** and
+  **Manual Scan Pete/Julia** look the label names up first (the *Labels …* node); the hourly Gmail Trigger does not,
+  so a `label` rule never matches there (use a `to` address and a forwarding filter for ongoing mail).
+  Typical use: `[ {from, to: "rob@", filename}, {from, label: "Rob", filename} ]`, any rule may match.
 - `subject`, `filename`: case-insensitive *regular expression*.
 - Empty fields are ignored; every non-empty field of a rule must match; a rule with no fields never matches.
 - With a list, any rule may match. The account with the **most matching fields** wins; ties go to

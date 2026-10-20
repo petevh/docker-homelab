@@ -8,6 +8,9 @@
 //   to       – substring of the To header (e.g. statements+julia@ plus-addressing)
 //   subject  – regex against the subject
 //   filename – regex against the attachment filename (not usable for link accounts)
+//   label    – a Gmail label on the email, by name, whole name, e.g. "Rob" (set by hand to tell apart
+//              mail that nothing in the headers can: the scan paths of Manual Scan / Pete / Julia add
+//              the label names; the hourly trigger does not)
 // A rule with no fields never matches. If several accounts match, the one with the
 // most matching fields wins. Emails that match nothing are dropped.
 //
@@ -21,7 +24,7 @@ const MAX_LINKS = 15;
 // Fetched here, and the emails arrive as this node's input, so there is no lookup of
 // other nodes by name and a failure is loud instead of silently matching nothing.
 const accounts = await this.helpers.httpRequest({ method: 'GET', url: 'http://pdf-decrypt:8080/accounts', json: true });
-const FIELDS = ['from', 'to', 'subject', 'filename'];
+const FIELDS = ['from', 'to', 'subject', 'filename', 'label'];
 
 const asRules = (m) => (Array.isArray(m) ? m : m ? [m] : []);
 const fieldsOf = (r = {}) => FIELDS.filter((k) => (r[k] || '').trim() !== '');
@@ -30,6 +33,7 @@ function ruleScore(r, mail) {
   const keys = fieldsOf(r);
   if (keys.length === 0) return 0;
   const ok = keys.every((k) => {
+    if (k === 'label') return (mail.labels || []).some((l) => String(l).toLowerCase() === r[k].trim().toLowerCase());
     if (k === 'from' || k === 'to') return mail[k].toLowerCase().includes(r[k].trim().toLowerCase());
     return new RegExp(r[k], 'i').test(mail[k]);
   });
@@ -216,6 +220,7 @@ emails.forEach((item, index) => {
     body,
     j.headers,
   );
+  mail0.labels = Array.isArray(j.labels) ? j.labels : [];
   const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());
   const receivedDay = (isNaN(parsed) ? new Date() : parsed).toISOString().slice(0, 10);
   // for a forward, the date the original email was sent (if it could be read), else when it arrived
