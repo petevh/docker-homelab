@@ -1,0 +1,154 @@
+[
+  {
+    "id": "FindFolderId001",
+    "name": "Find OneDrive folder id (helper)",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {},
+        "id": "9e2c4d10-3b7a-4f68-8d21-000000000001",
+        "name": "Manual Trigger",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [0, 0]
+      },
+      {
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "id": "a1",
+                "name": "account",
+                "value": "",
+                "type": "string"
+              },
+              {
+                "id": "a2",
+                "name": "path",
+                "value": "",
+                "type": "string"
+              },
+              {
+                "id": "a3",
+                "name": "folder_id",
+                "value": "",
+                "type": "string"
+              },
+              {
+                "id": "a4",
+                "name": "drive_id",
+                "value": "",
+                "type": "string"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "9e2c4d10-3b7a-4f68-8d21-000000000002",
+        "name": "Input",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [220, 0],
+        "notes": "Fill ONE of: account (key from private-config; uses its onedrive_folder) | path (from the OneDrive root) | folder_id (+ drive_id for someone else's drive) to check an id. Then Execute workflow."
+      },
+      {
+        "parameters": {
+          "jsCode": "// Decide what to ask Graph. Give an account key, a path, or a folder id (see the Input node).\n//   path (or the account's onedrive_folder)  -> look the folder up, answer: its id\n//   folder_id (+ drive_id if not your own)    -> check the id is alive, answer: where it is now\nconst input = $input.first().json;\nconst clean = (p) => String(p || '').trim().replace(/^\\/+|\\/+$/g, '');\nlet path = clean(input.path);\nlet account = String(input.account || '').trim();\nif (account && !path && !input.folder_id) {\n  const accounts = await this.helpers.httpRequest({ method: 'GET', url: 'http://pdf-decrypt:8080/accounts', json: true });\n  if (!accounts[account]) throw new Error(`Unknown account '${account}'. Keys: ${Object.keys(accounts).join(', ')}`);\n  path = clean(accounts[account].onedrive_folder);\n}\nconst folderId = String(input.folder_id || '').trim();\nconst driveId = String(input.drive_id || '').trim();\nif (!folderId && !path) throw new Error('Set account, path or folder_id in the Input node.');\nconst drive = driveId ? `drives/${encodeURIComponent(driveId)}` : 'me/drive';\nconst url = folderId\n  ? `https://graph.microsoft.com/v1.0/${drive}/items/${encodeURIComponent(folderId)}`\n  : `https://graph.microsoft.com/v1.0/me/drive/root:/${path.split('/').map(encodeURIComponent).join('/')}`;\nreturn [{ json: { url, mode: folderId ? 'check id' : 'find id', account, path, folderId, driveId } }];\n"
+        },
+        "id": "9e2c4d10-3b7a-4f68-8d21-000000000003",
+        "name": "Plan",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [440, 0]
+      },
+      {
+        "parameters": {
+          "url": "={{ $json.url }}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "$select",
+                "value": "id,name,folder,parentReference"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "9e2c4d10-3b7a-4f68-8d21-000000000004",
+        "name": "Graph Lookup",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [660, 0],
+        "onError": "continueRegularOutput",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "// Turn Graph's answer into something readable (and a config snippet to paste).\nconst ctx = $('Plan').first().json;\nconst r = $input.first().json;\nif (r.error) {\n  const status = r.error.httpCode || (String(r.error.message).match(/\\b([45]\\d{2})\\b/) || [])[1] || (/not\\s+be\\s+found|not found/i.test(r.error.message) ? '404' : '?');\n  const what = ctx.mode === 'check id' ? `folder id ${ctx.folderId}` : `path \"${ctx.path}\"`;\n  return [{ json: {\n    result: status === '404' || status === '410' ? `NOT FOUND: ${what} does not exist` : `ERROR ${status} for ${what}`,\n    detail: r.error.message,\n    hint: ctx.mode === 'check id'\n      ? 'The id is dead (folder deleted, or moved to another drive). Find the folder by path instead.'\n      : 'Check the spelling and capitalisation of the path, relative to the OneDrive root.',\n  } }];\n}\nconst ref = r.parentReference || {};\nconst parent = String(ref.path || '').replace(/^.*root:/, '').replace(/^\\/+|\\/+$/g, '');\nconst currentPath = [parent, r.name].filter(Boolean).join('/');\nconst snippet = ctx.driveId ? { folder_id: r.id, drive_id: ref.driveId } : { folder_id: r.id };\nreturn [{ json: {\n  result: r.folder ? 'FOUND' : 'FOUND, BUT IT IS A FILE, NOT A FOLDER',\n  name: r.name,\n  current_path: currentPath,\n  folder_id: r.id,\n  drive_id: ref.driveId || '',\n  for_private_config: `\"statements\": ${JSON.stringify(snippet)}  (add next to onedrive_folder; drive_id only for someone else's drive)`,\n} }];\n"
+        },
+        "id": "9e2c4d10-3b7a-4f68-8d21-000000000005",
+        "name": "Report",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [880, 0]
+      }
+    ],
+    "connections": {
+      "Manual Trigger": {
+        "main": [
+          [
+            {
+              "node": "Input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Input": {
+        "main": [
+          [
+            {
+              "node": "Plan",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Plan": {
+        "main": [
+          [
+            {
+              "node": "Graph Lookup",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Graph Lookup": {
+        "main": [
+          [
+            {
+              "node": "Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1"
+    }
+  }
+]

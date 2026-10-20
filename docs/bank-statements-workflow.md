@@ -149,6 +149,22 @@ setting `folder_id` to the folder's new id, or by deleting that account's entry 
 access/service problems and never clear an id. The Gmail trigger does not re-offer an email it already saw;
 that is why the fix is followed by Manual Scan.
 
+**Finding a folder's id.** Normally you never need to: it is recorded in `state/statement-folder-ids.json`. To look one up
+(or check that an id is still alive), open the workflow **Find OneDrive folder id (helper)** (`workflows/find-folder-id.json`,
+id `FindFolderId001`, never activated), fill one field in its **Input** node, and click **Execute workflow**:
+
+| Fill in | You get |
+|---|---|
+| `account` (key from `private-config.json`) | the id of that account's `onedrive_folder` |
+| `path` (from the OneDrive root) | the id of that folder |
+| `folder_id` (+ `drive_id` for someone else's drive) | whether it still exists and where it is now |
+
+The **Report** node prints `folder_id`, `drive_id`, the current path and a `statements` snippet to paste into the config.
+It uses the *Onedrive - Pete* credential and only reads. Paths are looked up in your own drive.
+
+Folder moves and id changes are logged by the sidecar: `docker logs n8n-pdf-decrypt | grep folder`
+(`folder recorded`, `folder moved`, `folder id changed`).
+
 ## 3. Passwords
 
 - Stored in `bank-automation/statement-passwords.json`: `{ "<account key>": "password" }`, where the value

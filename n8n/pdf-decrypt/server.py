@@ -69,10 +69,11 @@ def save_folder_id(account, onedrive_folder, folder_id, drive_id, seen_path):
 
     Written to a temporary file in the same directory and renamed over the old one, so
     a crash never leaves a half-written file. Raises OSError if the state directory is
-    not writable.
+    not writable. Returns the entry it replaced ({} if there was none).
     """
     with state_lock:
         data = load_folder_ids()
+        previous = data.get(account) if isinstance(data.get(account), dict) else {}
         data[account] = {
             "path": clean_folder(onedrive_folder),
             "folder_id": folder_id,
@@ -87,6 +88,7 @@ def save_folder_id(account, onedrive_folder, folder_id, drive_id, seen_path):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, FOLDER_IDS_PATH)
+    return previous
 
 
 def load_banks():
@@ -181,6 +183,17 @@ def decrypt(pdf, passwords):
             if "invalid password" not in result.stderr:
                 raise DecryptError(500, "qpdf failed: " + result.stderr.strip()[-300:])
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
+
+
+def log_folder_change(account, previous, folder_id, seen_path):
+    """One line per change worth knowing about, in `docker logs n8n-pdf-decrypt`."""
+    old_path = previous.get("seen_path", "")
+    if not previous.get("folder_id"):
+        print(f"folder recorded: {account} -> '{seen_path}' ({folder_id})", flush=True)
+    elif previous["folder_id"] != folder_id:
+        print(f"folder id changed: {account} '{old_path}' ({previous['folder_id']}) -> '{seen_path}' ({folder_id})", flush=True)
+    elif old_path != seen_path:
+        print(f"folder moved: {account} '{old_path}' -> '{seen_path}'", flush=True)
 
 
 def recorded_for(entry, onedrive_folder):
@@ -279,7 +292,8 @@ class Handler(BaseHTTPRequestHandler):
             if account not in banks:
                 self.send_json(404, {"error": f"unknown account '{account}'"})
                 return
-            save_folder_id(account, banks[account].get("onedrive_folder", ""), folder_id, drive_id, seen_path)
+            previous = save_folder_id(account, banks[account].get("onedrive_folder", ""), folder_id, drive_id, seen_path)
+            log_folder_change(account, previous, folder_id, seen_path)
         except (AttributeError, TypeError, ValueError) as e:
             self.send_json(400, {"error": str(e)})
             return
