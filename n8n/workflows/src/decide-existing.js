@@ -33,7 +33,7 @@ for (let i = 0; i < items.length; i++) {
           line:
             `${ctx.account}: "${ctx.fileName}" already exists in OneDrive (${ctx.folder}) with different content ` +
             `(existing ${body.size} bytes, new ${decryptedSize} bytes), so the new file was NOT filed and the existing one was left alone. ` +
-            `If the new one is the right one, delete or rename the old file in OneDrive and run Manual Scan.`,
+            `If the new one is the right one, delete or rename the old file in OneDrive and run Manual Scan.\n  Email: ${ctx.emailInfo}`,
         },
         pairedItem: paired,
       });

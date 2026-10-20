@@ -161,6 +161,7 @@ def load_banks():
                 "filename_template": st.get("filename_template", ""),
                 "date_source": st.get("date_source", ""),
                 "purge_email": bool(st.get("purge_email", False)),
+                "has_password": any(as_list(passwords.get(key, st.get("decryption_password", "")))),
                 "name": acct.get("name", ""),
             }
     return out
@@ -226,6 +227,8 @@ def decrypt(pdf, passwords):
                     return f.read(), True, index
             if "invalid password" not in result.stderr:
                 raise DecryptError(500, "qpdf failed: " + result.stderr.strip()[-300:])
+        if not any(candidates):
+            raise DecryptError(422, "this PDF needs a password but none is set for this account in statement-passwords.json")
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
@@ -279,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                     "filename_template": bank.get("filename_template", ""),
                     "date_source": bank.get("date_source", ""),
                     "purge_email": bank.get("purge_email", False),
+                    "has_password": bank.get("has_password", False),  # whether one is on file, never the value
                     "name": bank.get("name", ""),
                 }
                 for key, bank in banks.items()

@@ -218,6 +218,8 @@ Run Summary email still counts what was intended. Nothing is deleted unless `pur
 4. When finished: delete the credential in n8n (if it was only for this) and revoke the app in that Google account (myaccount.google.com → Security → third-party apps). Google refresh tokens do not expire on their own, so revoking is what ends the access.
 `julia` works the same way.
 
+Each failure line in the alert email also names the **original email** (subject, sender, date, mailbox and a Gmail link; the link opens in the right account via `authuser=`).
+
 ### 2.7 Notifications and the ledger
 - **Failure** (undecryptable file, missing folder id, OneDrive error): one email per run listing every failed file; the run is marked failed.
 - **Manual scan**: always one email with the full result (`3 filed, 14 skipped`, each file and its folder).
@@ -307,7 +309,8 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
 | Statement not filed, listed under "NOT MATCHED" | No rule for that sender, or the rule's `filename` doesn't match what n8n reports (note the `/` truncation). |
 | Forwarded mail not matched | Sender not in `TRUSTED_FORWARDERS`, or Google's authentication header didn't show an aligned pass, or the mail has no `Authentication-Results` (forwards must arrive through Gmail). |
 | Link statement not fetched | Account lacks `link.enabled`, link host not in `allow_hosts`, or the response wasn't a PDF (the error lists each attempt). |
-| Alert email: `could not be decrypted … (tried N)` | Missing/wrong password for that account. Only that file is skipped; fix `statement-passwords.json`, then Manual Scan. |
+| Alert email: `could not be decrypted: this PDF needs a password but none is set…` | The account has no entry in `statement-passwords.json`. |
+| Alert email: `could not be decrypted … invalid password (tried N)` | Missing/wrong password for that account. Only that file is skipped; fix `statement-passwords.json`, then Manual Scan. |
 | Zero matches although emails arrive | Check the sidecar is up (`docker ps`) — Match fetches `/accounts` itself and fails loudly if it can't. |
 | `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). A 404 on a folder id: see 2.6. |
 | Sidecar can't read config | The bind mount points at a replaced file → restart `pdf-decrypt`. |

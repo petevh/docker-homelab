@@ -35,6 +35,13 @@ if (filed.length) parts.push('FILED\n' + filed.map((j) => `- ${j.account}: ${j.f
 if (skipped.length) {
   parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}`).join('\n'));
 }
+const labelFails = ['Statements', 'Pete', 'Julia']
+  .map((who) => [who, $(`Mark ${who}`).isExecuted ? $(`Mark ${who}`).all().filter((i) => i.json.error).length : 0])
+  .filter(([, n]) => n > 0);
+if (labelFails.length) {
+  parts.push('Note: could not label ' + labelFails.map(([who, n]) => `${n} email${n === 1 ? '' : 's'} in the ${who} mailbox`).join(', ') +
+    '. Check the Gmail credential on that mailbox\'s Labels / Create Labels / List Labels / Mark / Trash nodes.');
+}
 if (filed.some((j) => j.ledgerError)) parts.push('Note: the filed-statements ledger could not be updated, so the monthly summary will miss these files.');
 
 const subject = failures.length

@@ -15,9 +15,9 @@ for (let i = 0; i < items.length; i++) {
       messageId: ctx.messageId,
       mailbox: ctx.mailbox,
       line:
-        `${ctx.account}: "${ctx.fileName}" could not be decrypted and was not filed: ${why}. ` +
-        `Check this account's entry in statement-passwords.json (missing, wrong or changed password), ` +
-        `then run Manual Scan (re-uploads replace same-named files).`,
+        `${ctx.account}: "${ctx.fileName}" could not be decrypted and was not filed: ${why}\n` +
+        `  Email: ${ctx.emailInfo}\n` +
+        `  Then run Manual Scan (re-uploads are skipped, only the failed files are filed).`,
     },
     pairedItem: { item: i },
   });
