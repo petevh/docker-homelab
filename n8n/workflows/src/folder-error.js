@@ -11,7 +11,11 @@ const items = $input.all();
 for (let i = 0; i < items.length; i++) {
   const ctx = $('Fetch Linked PDFs').itemMatching(i).json;
   const err = items[i].json.error || items[i].json;
-  const status = Number(err.httpCode) || Number((String(err.message).match(/\b([45]\d{2})\b/) || [])[1]) || 0;
+  // the HTTP node does not always carry a status code, so fall back to the message text
+  const status =
+    Number(err.httpCode) ||
+    Number((String(err.message).match(/\b([45]\d{2})\b/) || [])[1]) ||
+    (/could not be found|not found/i.test(String(err.message)) ? 404 : 0);
   const gone = ctx.folderSource !== 'path' && (status === 404 || status === 410);
   if (gone) {
     lines.push(
