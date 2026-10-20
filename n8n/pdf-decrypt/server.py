@@ -160,6 +160,7 @@ def load_banks():
                 "link": st.get("link", {}),
                 "filename_template": st.get("filename_template", ""),
                 "date_source": st.get("date_source", ""),
+                "purge_email": bool(st.get("purge_email", False)),
                 "name": acct.get("name", ""),
             }
     return out
@@ -277,6 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                     "link": bank.get("link", {}),
                     "filename_template": bank.get("filename_template", ""),
                     "date_source": bank.get("date_source", ""),
+                    "purge_email": bank.get("purge_email", False),
                     "name": bank.get("name", ""),
                 }
                 for key, bank in banks.items()

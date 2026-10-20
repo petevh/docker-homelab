@@ -243,11 +243,18 @@ emails.forEach((item, index) => {
     return { uploadUrl, folderSource: source, folderId, driveId, recordedPath: recorded.seen_path || '' };
   };
 
+  // Which mailbox the email came from (the Scan Pete/Julia branches tag it) and whether the account
+  // wants its emails deleted once filed. An email with a PDF that matched no account must never be
+  // purged: it may hold something else (a receipt, a tax invoice), so Mail Outcome checks the flag.
+  const mailbox = j.mailbox || 'statements';
   let attached = false;
+  let pdfCount = 0;
+  const emitted = [];
   for (const bin of Object.values(item.binary || {})) {
     const original = bin.fileName || 'statement.pdf';
     const isPdf = bin.mimeType === 'application/pdf' || /\.pdf$/i.test(original);
     if (!isPdf) continue;
+    pdfCount++;
 
     const mail = { ...mail0, filename: original };
     const hit = Object.entries(accounts)
@@ -261,14 +268,19 @@ emails.forEach((item, index) => {
     // Banks reuse the same attachment name every month, so the template carries the date.
     const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, original, mail0.subject));
     attached = true;
-    out.push({
-      json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim() },
+    const o = {
+      json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, mailbox, purge: !!cfg.purge_email, subject: mail0.subject, from: mail0.from.trim() },
       binary: { data: bin },
       pairedItem: { item: index },
-    });
+    };
+    emitted.push(o);
+    out.push(o);
   }
 
-  if (attached) return;
+  if (attached) {
+    emitted.forEach((o) => { o.json.hasUnmatchedPdf = pdfCount > emitted.length; });
+    return;
+  }
 
   // No matching attachment: look for accounts whose statement is a download link.
   const hit = Object.entries(accounts)
@@ -285,7 +297,7 @@ emails.forEach((item, index) => {
   const folder = folderOf(cfg, account);
   const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, mail0.subject || 'statement', mail0.subject));
   out.push({
-    json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },
+    json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, mailbox, purge: !!cfg.purge_email, hasUnmatchedPdf: pdfCount > 0, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },
     pairedItem: { item: index },
   });
 });

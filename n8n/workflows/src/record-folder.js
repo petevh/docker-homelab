@@ -27,6 +27,10 @@ for (let i = 0; i < items.length; i++) {
     recorded: false,
     filed: true,
     isNew: false,
+    messageId: ctx.messageId,
+    mailbox: ctx.mailbox,
+    purge: ctx.purge,
+    hasUnmatchedPdf: ctx.hasUnmatchedPdf,
   };
 
   const moved = ctx.folderSource === 'recorded' && seenPath && seenPath !== ctx.recordedPath;

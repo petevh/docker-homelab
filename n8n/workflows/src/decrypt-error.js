@@ -12,6 +12,8 @@ for (let i = 0; i < items.length; i++) {
   out.push({
     json: {
       failure: 'decrypt',
+      messageId: ctx.messageId,
+      mailbox: ctx.mailbox,
       line:
         `${ctx.account}: "${ctx.fileName}" could not be decrypted and was not filed: ${why}. ` +
         `Check this account's entry in statement-passwords.json (missing, wrong or changed password), ` +

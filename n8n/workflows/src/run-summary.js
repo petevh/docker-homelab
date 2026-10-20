@@ -11,7 +11,8 @@ const byName = (a, b) => (a.account + a.fileName).localeCompare(b.account + b.fi
 const filed = rows.filter((j) => j.filed).sort(byName);
 const skipped = rows.filter((j) => j.skipped).sort(byName);
 const failures = rows.filter((j) => j.failure && j.line);
-const manual = $('Manual Scan').isExecuted;
+const manual = ['Manual Scan', 'Manual Scan Pete', 'Manual Scan Julia'].some((name) => $(name).isExecuted);
+const marked = $('Mail Outcome').isExecuted ? $('Mail Outcome').all().map((i) => i.json) : [];
 if (failures.length === 0 && !manual) return [];
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -22,6 +23,14 @@ const head =
 
 const parts = [head];
 if (failures.length) parts.push('NOT FILED\n\n' + failures.map((j) => j.line).join('\n\n'));
+if (marked.length) {
+  const ok = marked.filter((m) => m.outcome === 'filed');
+  const purged = ok.filter((m) => m.purge).length;
+  parts.push(
+    `Emails: ${ok.length} labelled Statements/Filed` + (purged ? ` (${purged} of them moved to Trash: purge_email is set)` : '') +
+      `, ${marked.length - ok.length} labelled Statements/Failed.`,
+  );
+}
 if (filed.length) parts.push('FILED\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\n    -> ${j.folder}`).join('\n'));
 if (skipped.length) {
   parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}`).join('\n'));

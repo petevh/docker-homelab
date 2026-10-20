@@ -53,4 +53,7 @@ for (let i = 0; i < items.length; i++) {
 function folderWhere(ctx) {
   return ctx.folderSource === 'path' ? `by path ${ctx.folder}` : `folder id ${ctx.folderId}`;
 }
-return lines.map((line, i) => ({ json: { failure: 'folder', line }, pairedItem: { item: i } }));
+return lines.map((line, i) => {
+  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;
+  return { json: { failure: 'folder', line, messageId: ctx.messageId, mailbox: ctx.mailbox }, pairedItem: { item: i } };
+});

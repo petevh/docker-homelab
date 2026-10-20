@@ -45,6 +45,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=fail` (never overwrites), 5 tries 10 s apart. Credential *Onedrive - Pete*. See 2.6. |
 | **Record Folder** | After a successful upload: add the file to the ledger (`state/filed-log.json`, via the sidecar's `POST /filed`) and record the folder id (and where the folder currently is). |
 | **Decrypt Error / Folder Error** | One failure line per file that could not be decrypted / uploaded. The rest of the run carries on. |
+| **Mail Outcome → Mailbox? → Prepare/Create Labels/List Labels/Expand/Mark/Purge?/Trash (per mailbox)** | Runs before the summary (n8n runs the node placed higher on the canvas first, so keep it above). Labels each handled email and trashes it when the account has `purge_email`. See 2.9. |
 | **Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed** | The Merge waits for every branch, so this runs once at the end. It emails (*Gmail - statements* → pete@vanheerden.ch) when something failed, or after any **manual scan** (full list of what was filed, marked new or replaced, plus failures). A scheduled/hourly run where everything worked sends nothing. If anything failed the run then ends red (**Run Failed**). A scan that matches no statements sends nothing. |
 | **Bank statements: monthly summary** (separate workflow, `workflows/monthly-summary.json`, id `BankStmtMonthly001`) | On the 1st at 08:00 it emails the statements first filed in the previous month, per account, and the accounts that had none. **Manual Run** sends the same for the previous month on demand. Reads the ledger from the sidecar (`GET /filed?month=YYYY-MM`). |
 | **pdf-decrypt sidecar** | qpdf over HTTP. Holds the passwords so they never appear in n8n execution data. Internal only (no Traefik labels), runs read-only as uid 3000. |
@@ -188,6 +189,29 @@ This applies to hourly runs and manual scans alike, so a bank re-sending a state
 corrected statement is never silently overwritten or lost. Size, not a hash, is compared (n8n's Code node cannot
 hash); the same statement decrypts to the same bytes. No `(2)` copies are created, because a re-scan would then
 make another copy every time; if you want a corrected statement filed next to the original, rename the old one.
+
+### 2.9 Marking and cleaning up the emails
+After every run **Mail Outcome** looks at each email that was handled and marks it in the mailbox it came from
+(Gmail API, labels created on first use):
+
+| Outcome | Label | Trash? |
+|---|---|---|
+| every PDF of it is in OneDrive (uploaded now, or an identical file was already there) | `Statements/Filed` | only if **every** account involved has `statements.purge_email: true` and the email has no PDF that matched no account |
+| at least one PDF failed (decrypt, upload, a clashing file) | `Statements/Failed` | never |
+| matched nothing | untouched | never |
+
+A later successful run swaps `Failed` for `Filed`. "Trash" is Gmail's Trash: recoverable for 30 days, then purged.
+Your own label-based clean-up rules can take over from `Statements/Filed`. Re-running a manual scan also labels
+mail that was filed before this existed. Marking and trashing never fail the run; if they do not work the
+Run Summary email still counts what was intended. Nothing is deleted unless `purge_email` is set per account.
+
+**Other mailboxes (temporary).** The workflow has two extra, normally idle entry points: **Manual Scan Pete** and
+**Manual Scan Julia** (each: trigger → Scan → Tag → Match). To use one:
+1. In n8n create a Gmail OAuth2 credential, signed in as that user (e.g. *Gmail - pete (temporary)*), and select it on the **Scan Pete** node (and the *Pete* nodes: Create/List Labels, Mark, Trash).
+2. Adjust the search on the Scan node (default: PDF attachments from the last 90 days, not yet labelled `Statements/Filed`, max 100).
+3. Open the **Manual Scan Pete** node and execute from it. Results go through the same matching, filing, skipping and summary email as a normal scan; emails are labelled (and trashed where `purge_email` is set) **in that user's mailbox**.
+4. When finished: delete the credential in n8n and revoke the app in that Google account (myaccount.google.com → Security → third-party apps). Google refresh tokens do not expire on their own, so revoking is what ends the access.
+`julia` works the same way.
 
 ### 2.7 Notifications and the ledger
 - **Failure** (undecryptable file, missing folder id, OneDrive error): one email per run listing every failed file; the run is marked failed.

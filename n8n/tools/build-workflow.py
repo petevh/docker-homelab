@@ -28,6 +28,7 @@ WORKFLOWS = {  # workflow file -> {node name -> source file}
         "Record Folder": SRC / "record-folder.js",
         "Folder Error": SRC / "folder-error.js",
         "Decrypt Error": SRC / "decrypt-error.js",
+        "Mail Outcome": SRC / "mail-outcome.js",
         "Run Summary": SRC / "run-summary.js",
     },
     ROOT / "workflows" / "monthly-summary.json": {
