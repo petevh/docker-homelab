@@ -33,7 +33,7 @@ if (marked.length) {
 }
 if (filed.length) parts.push('FILED\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\n    -> ${j.folder}`).join('\n'));
 if (skipped.length) {
-  parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}`).join('\n'));
+  parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}${j.uncompared ? '  (exists; the check timed out so it was not compared)' : ''}`).join('\n'));
 }
 const labelFails = ['Statements', 'Pete', 'Julia']
   .map((who) => [who, $(`Mark ${who}`).isExecuted ? $(`Mark ${who}`).all().filter((i) => i.json.error).length : 0])

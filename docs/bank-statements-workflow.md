@@ -188,7 +188,7 @@ Before each upload the workflow asks OneDrive whether a file with the target nam
 | nothing with that name | uploaded (never with overwrite: `conflictBehavior=fail`) |
 | same name, **same size** | **skipped**, listed under SKIPPED in the manual-scan email; not added to the ledger |
 | same name, **different size** | **not filed** and the existing file is left alone: listed as a failure ("already exists with different content, existing N bytes, new M bytes"), alert email, run ends red. If the new one is right, delete or rename the old file and run Manual Scan. |
-| could not check (error) | upload is tried anyway; if the name turns out to exist, Graph refuses (409) and it is reported |
+| could not check (timeout/error, 5 tries) | upload is tried anyway; if the name turns out to exist, OneDrive refuses ("The specified item name already exists") and the file is listed as **skipped (exists; the check timed out so it was not compared)**, not as a failure; its email counts as filed |
 
 This applies to hourly runs and manual scans alike, so a bank re-sending a statement does not create copies and a
 corrected statement is never silently overwritten or lost. Size, not a hash, is compared (n8n's Code node cannot
