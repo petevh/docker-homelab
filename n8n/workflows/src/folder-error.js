@@ -25,10 +25,22 @@ for (let i = 0; i < items.length; i++) {
         `Fix: set statements.folder_id to the folder's current id, or delete this account's entry in state/statement-folder-ids.json ` +
         `to look the path up again, then run Manual Scan (re-uploads replace same-named files).`,
     );
+  } else if (!status && /timed? ?out|abort|econn|etimedout|enotfound|socket|network|offline/i.test(String(err.message))) {
+    // no HTTP answer at all: the connection to OneDrive dropped or timed out (already retried by the node)
+    lines.push(
+      `${ctx.account}: "${ctx.fileName}" was not filed. The connection to OneDrive failed (${err.message}). ` +
+        `This is usually a temporary network or OneDrive problem, not a missing folder: run Manual Scan again, ` +
+        `and look closer only if the same file fails twice.`,
+    );
+  } else if (status === 429 || status >= 500) {
+    lines.push(
+      `${ctx.account}: "${ctx.fileName}" was not filed. OneDrive returned ${status} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +
+        `OneDrive is throttling or having trouble, which is usually temporary: run Manual Scan again.`,
+    );
   } else {
     lines.push(
       `${ctx.account}: "${ctx.fileName}" was not filed. OneDrive returned ${status || 'an error'} (${folderWhere(ctx)}): ${err.message || JSON.stringify(err)}. ` +
-        `This is an access or service problem, not a missing folder. Run Manual Scan once it is fixed.`,
+        `This is an access problem, not a missing folder. Check the OneDrive credential and the folder's sharing, then run Manual Scan.`,
     );
   }
 }
