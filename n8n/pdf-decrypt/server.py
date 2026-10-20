@@ -5,7 +5,11 @@ The per-account PDF passwords stay in this container: n8n only ever sends an
 account key, so passwords never show up in n8n execution data.
 
   GET  /health                 liveness
-  GET  /accounts               {key: {match, onedrive_folder}} -- no secrets
+  GET  /accounts               {key: {match, onedrive_folder, folder_id, drive_id,
+                               recorded}} -- no secrets
+  POST /folder-id?account=KEY  JSON {folder_id, drive_id, seen_path}: remember the OneDrive
+                               folder id the workflow resolved for the account's
+                               current onedrive_folder (state file, see below)
   POST /decrypt?account=KEY    body = PDF, response = decrypted PDF
                                (unencrypted PDFs are returned unchanged)
 """
@@ -15,13 +19,22 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/private-config.json")
 PASSWORDS_PATH = os.environ.get("PASSWORDS_PATH", "/config/statement-passwords.json")
+# Folder ids the workflow has resolved, {account key: {path, folder_id, drive_id, seen_path,
+# updated}}. Lives in its own writable directory (the config is mounted read-only) so
+# the file can be replaced atomically.
+FOLDER_IDS_PATH = os.environ.get("FOLDER_IDS_PATH", "/state/statement-folder-ids.json")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_BODY = 50 * 1024 * 1024
+MAX_JSON_BODY = 16 * 1024
+ID_PATTERN = re.compile(r"^[A-Za-z0-9!_=.$-]{1,256}$")
+state_lock = threading.Lock()
 
 
 def slug(text):
@@ -35,6 +48,45 @@ def load_passwords():
             return json.load(f)
     except FileNotFoundError:
         return {}
+
+
+def clean_folder(path):
+    return (path or "").strip().strip("/")
+
+
+def load_folder_ids():
+    """{account key: entry} from the state file; {} if absent or unreadable."""
+    try:
+        with open(FOLDER_IDS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_folder_id(account, onedrive_folder, folder_id, drive_id, seen_path):
+    """Record the id resolved for `account`, keyed to the folder path configured now.
+
+    Written to a temporary file in the same directory and renamed over the old one, so
+    a crash never leaves a half-written file. Raises OSError if the state directory is
+    not writable.
+    """
+    with state_lock:
+        data = load_folder_ids()
+        data[account] = {
+            "path": clean_folder(onedrive_folder),
+            "folder_id": folder_id,
+            "drive_id": drive_id,
+            "seen_path": seen_path,
+            "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        tmp = FOLDER_IDS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, FOLDER_IDS_PATH)
 
 
 def load_banks():
@@ -57,6 +109,8 @@ def load_banks():
             out[key] = {
                 "decryption_password": passwords.get(key, st.get("decryption_password", "")),
                 "onedrive_folder": st.get("onedrive_folder", ""),
+                "folder_id": st.get("folder_id", ""),
+                "drive_id": st.get("drive_id", ""),
                 "match": st.get("match", {}),
                 "link": st.get("link", {}),
                 "filename_template": st.get("filename_template", ""),
@@ -129,6 +183,12 @@ def decrypt(pdf, passwords):
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
+def recorded_for(entry, onedrive_folder):
+    if isinstance(entry, dict) and entry.get("folder_id") and entry.get("path") == clean_folder(onedrive_folder):
+        return {k: entry.get(k, "") for k in ("folder_id", "drive_id", "seen_path")}
+    return {}
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, body):
         data = json.dumps(body).encode()
@@ -148,10 +208,16 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as e:
                 self.send_json(500, {"error": f"cannot load config: {e}"})
                 return
+            recorded = load_folder_ids()
             self.send_json(200, {
                 key: {
                     "match": bank.get("match", {}),
                     "onedrive_folder": bank.get("onedrive_folder", ""),
+                    "folder_id": bank.get("folder_id", ""),
+                    "drive_id": bank.get("drive_id", ""),
+                    # the id found earlier, but only while it was recorded for the folder
+                    # path configured now: editing onedrive_folder triggers a fresh lookup
+                    "recorded": recorded_for(recorded.get(key), bank.get("onedrive_folder", "")),
                     "link": bank.get("link", {}),
                     "filename_template": bank.get("filename_template", ""),
                     "date_source": bank.get("date_source", ""),
@@ -164,6 +230,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
+        if url.path == "/folder-id":
+            self.record_folder_id(parse_qs(url.query).get("account", [""])[0])
+            return
         if url.path != "/decrypt":
             self.send_json(404, {"error": "not found"})
             return
@@ -193,6 +262,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Password-Index", str(used))
         self.end_headers()
         self.wfile.write(out)
+
+    def record_folder_id(self, account):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_JSON_BODY:
+            self.send_json(400, {"error": "bad body size"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+            folder_id = body.get("folder_id", "")
+            drive_id = body.get("drive_id", "")
+            seen_path = str(body.get("seen_path", ""))[:1024]
+            if not ID_PATTERN.match(folder_id) or (drive_id and not ID_PATTERN.match(drive_id)):
+                raise ValueError("folder_id/drive_id are not valid OneDrive ids")
+            banks = load_banks()
+            if account not in banks:
+                self.send_json(404, {"error": f"unknown account '{account}'"})
+                return
+            save_folder_id(account, banks[account].get("onedrive_folder", ""), folder_id, drive_id, seen_path)
+        except (AttributeError, TypeError, ValueError) as e:
+            self.send_json(400, {"error": str(e)})
+            return
+        except OSError as e:
+            self.send_json(500, {"error": f"cannot save folder id: {e}"})
+            return
+        self.send_json(200, {"recorded": account})
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} {fmt % args}", flush=True)

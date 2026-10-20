@@ -55,6 +55,9 @@ services:
       - ${BANK_CONFIG_FILE:-../../bank-automation/private-config.json}:/config/private-config.json:ro
       # Must exist before `up` (Docker would create a directory in its place)
       - ${BANK_PASSWORDS_FILE:-../../bank-automation/statement-passwords.json}:/config/statement-passwords.json:ro
+      # The only writable mount: statement-folder-ids.json (OneDrive folder ids the workflow
+      # resolved). A directory, so the file can be replaced atomically. Created on first use.
+      - ${BANK_STATE_DIR:-../../bank-automation/state}:/state
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s

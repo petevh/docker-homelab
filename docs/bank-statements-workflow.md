@@ -25,7 +25,10 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
                                ▼
                          Decrypt PDF ──error──► Decrypt Failed (stops the run, names the file)
                                ▼              POST pdf-decrypt:8080/decrypt?account=KEY
-                      Upload to OneDrive      (Graph PUT by path, replaces same-named file)
+                      Upload to OneDrive      (Graph PUT into the folder by id, else by path; replaces same-named file)
+                       │            └─error─► Folder Error → Email Folder Alert → Folder Failed (after the rest of the run)
+                       ▼
+                     Record Folder            (remembers the folder id via POST pdf-decrypt:8080/folder-id)
 ```
 
 | Piece | Role |
@@ -35,7 +38,8 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Match Statements** | Decides which account each PDF belongs to and what to call it. Fetches the account list itself from the sidecar. |
 | **Fetch Linked PDFs** | For statements delivered as a download link: follows the link, keeps only a real PDF. Other items pass through. |
 | **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Failed**. |
-| **Upload to OneDrive** | `PUT /me/drive/root:/<folder>/<file>:/content`, `conflictBehavior=replace`. Credential *Onedrive - Pete*. |
+| **Upload to OneDrive** | `PUT .../items/<folder id>:/<file>:/content` when a folder id is known, else `PUT /me/drive/root:/<folder>/<file>:/content` (Graph creates missing folders). `conflictBehavior=replace`, 3 tries. Credential *Onedrive - Pete*. See 2.6. |
+| **Record Folder / Folder Error** | After the upload: record the folder id (and where the folder currently is); or, on failure, build one alert, email it (*Gmail - statements* sends to pete@vanheerden.ch) and fail the run at the end. |
 | **pdf-decrypt sidecar** | qpdf over HTTP. Holds the passwords so they never appear in n8n execution data. Internal only (no Traefik labels), runs read-only as uid 3000. |
 
 n8n itself cannot read the config files (NAS permissions are 770 for `pvh`, n8n runs as uid 1000),
@@ -121,6 +125,30 @@ replaces the whole pattern. Tokens: `{date} {emaildate} {year} {month} {key} {na
 names (`Attachment.pdf`). Keep `{original}` or something equally unique: two files with the same final name
 replace each other. Characters illegal in OneDrive names (`\ / : * ? " < > | # %`) become `_`.
 
+### 2.6 Folders and ids (moving or reorganising folders)
+Files are filed by **folder id**, so you can move or rename the folders in OneDrive without touching the
+config. Per account, in this order:
+
+1. `statements.folder_id` (and `drive_id` for someone else's drive) in `private-config.json`: always wins.
+2. The id the workflow recorded for the account, kept in `bank-automation/state/statement-folder-ids.json`
+   (written by the sidecar, git-ignored, **back it up with the config**). It is only used while it was
+   recorded for the `onedrive_folder` currently configured, so changing `onedrive_folder` on purpose
+   triggers a fresh lookup.
+3. Otherwise the `onedrive_folder` path. The first upload by path finds an existing folder (or creates a
+   missing one) and the reply names it, so the next upload uses its id. Existing folders are adopted, not duplicated.
+
+After each upload the sidecar also stores `seen_path`, the folder's current path, so the state file tells you
+where a moved folder ended up. `onedrive_folder` in the config can then go stale: it is only the
+starting point and the label for the first lookup, so update it when convenient.
+
+If the id returns **404/410** (folder deleted, or moved to another drive, which changes ids) that file is not
+filed and the path is **not** recreated. The rest of the run carries on, you get one email naming the
+account, the id, the configured path and the last known location, and the run ends marked failed. Fix it by
+setting `folder_id` to the folder's new id, or by deleting that account's entry in `statement-folder-ids.json`
+(next upload looks the path up again), then run Manual Scan. 401/403/429/5xx are reported the same way but described as
+access/service problems and never clear an id. The Gmail trigger does not re-offer an email it already saw;
+that is why the fix is followed by Manual Scan.
+
 ## 3. Passwords
 
 - Stored in `bank-automation/statement-passwords.json`: `{ "<account key>": "password" }`, where the value
@@ -142,7 +170,8 @@ replace each other. Characters illegal in OneDrive names (`\ / : * ? " < > | # %
 
 ### Services
 `cd n8n && docker compose up -d --build pdf-decrypt` rebuilds/redeploys just the sidecar (do this after
-editing `pdf-decrypt/server.py`). Config and passwords are read live; no restart needed for edits. The
+editing `pdf-decrypt/server.py`). The sidecar has one writable mount, `BANK_STATE_DIR` (default
+`../../bank-automation/state`, mounted at `/state`); create it first (`mkdir`, owned by uid 3000/`pvh`) or Docker makes it as root. Config and passwords are read live; no restart needed for edits. The
 config is a single-file bind mount: edit it in place (an editor that replaces the file leaves the
 container looking at the old inode → `docker compose restart pdf-decrypt`).
 
@@ -202,7 +231,7 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
 | Link statement not fetched | Account lacks `link.enabled`, link host not in `allow_hosts`, or the response wasn't a PDF (the error lists each attempt). |
 | Run stops with `invalid password … (tried N)` | Missing/wrong password for that account. All later files in the run are skipped until fixed. |
 | Zero matches although emails arrive | Check the sidecar is up (`docker ps`) — Match fetches `/accounts` itself and fails loudly if it can't. |
-| `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). |
+| `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). A 404 on a folder id: see 2.6. |
 | Sidecar can't read config | The bind mount points at a replaced file → restart `pdf-decrypt`. |
 
 **Traps that cost time — read before changing code:**

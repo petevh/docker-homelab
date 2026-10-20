@@ -22,6 +22,8 @@ WORKFLOW = ROOT / "workflows" / "bank-statements.json"
 SOURCES = {  # node name -> source file
     "Match Statements": ROOT / "workflows" / "src" / "match-statements.js",
     "Fetch Linked PDFs": ROOT / "workflows" / "src" / "fetch-linked-pdfs.js",
+    "Record Folder": ROOT / "workflows" / "src" / "record-folder.js",
+    "Folder Error": ROOT / "workflows" / "src" / "folder-error.js",
 }
 
 

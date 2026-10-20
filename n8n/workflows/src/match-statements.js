@@ -226,6 +226,22 @@ emails.forEach((item, index) => {
     return folder;
   };
   const pathOf = (folder, fileName) => [...folder.split('/'), fileName].map(encodeURIComponent).join('/');
+  // Where to PUT the file. A folder id wins over the path, so folders can be moved or
+  // renamed in OneDrive: first a `folder_id` set in the config, then the id the workflow
+  // recorded earlier for this path, else the path itself (Graph creates missing folders and
+  // the response tells the next node the id to record). `drive_id` only matters for a folder
+  // in someone else's drive.
+  const targetOf = (cfg, folder, fileName) => {
+    const recorded = cfg.recorded || {};
+    const source = cfg.folder_id ? 'config' : recorded.folder_id ? 'recorded' : 'path';
+    const folderId = source === 'config' ? cfg.folder_id : recorded.folder_id || '';
+    const driveId = source === 'config' ? cfg.drive_id || '' : recorded.drive_id || '';
+    const drive = driveId ? `drives/${encodeURIComponent(driveId)}` : 'me/drive';
+    const uploadUrl = folderId
+      ? `https://graph.microsoft.com/v1.0/${drive}/items/${encodeURIComponent(folderId)}:/${encodeURIComponent(fileName)}:/content`
+      : `https://graph.microsoft.com/v1.0/me/drive/root:/${pathOf(folder, fileName)}:/content`;
+    return { uploadUrl, folderSource: source, folderId, driveId, recordedPath: recorded.seen_path || '' };
+  };
 
   let attached = false;
   for (const bin of Object.values(item.binary || {})) {
@@ -246,7 +262,7 @@ emails.forEach((item, index) => {
     const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, original, mail0.subject));
     attached = true;
     out.push({
-      json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim() },
+      json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim() },
       binary: { data: bin },
       pairedItem: { item: index },
     });
@@ -269,7 +285,7 @@ emails.forEach((item, index) => {
   const folder = folderOf(cfg, account);
   const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, mail0.subject || 'statement', mail0.subject));
   out.push({
-    json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },
+    json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },
     pairedItem: { item: index },
   });
 });
