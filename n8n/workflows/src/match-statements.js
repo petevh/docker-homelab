@@ -197,7 +197,8 @@ function tokensFor(cfg, account, emailDate, originalName, subject) {
   const found = cfg.date_source === 'email' ? '' : dateFromText(originalName);
   const date = found || emailDate;
   return {
-    date, emaildate: emailDate, year: date.slice(0, 4), month: date.slice(5, 7),
+    // file names use periods (2026.10.07); year/month are cut from the ISO form first
+    date: date.replace(/-/g, '.'), emaildate: emailDate.replace(/-/g, '.'), year: date.slice(0, 4), month: date.slice(5, 7),
     key: account, name: cfg.name || account, subject: safeName(subject), original: safeName(originalName).replace(/\.pdf$/i, ''),
   };
 }
