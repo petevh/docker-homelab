@@ -120,7 +120,7 @@ Response header `X-Password-Index`: `-1` not encrypted, `-2` encrypted but neede
 `0..n` index of the password list entry that worked. It never contains the password.
 
 ### 2.5 Naming
-Saved as `<onedrive_folder>/<template>.pdf`. Default template: `{date}_{key}_{original}`.
+Saved as `<onedrive_folder>/<template>.pdf`. Dates in file names use periods (`2026.10.07`), not hyphens. Default template: `{date}_{key}_{original}`.
 
 `{date}` = the **statement's own date** if the original file name (or, for link statements, the
 subject) contains one, otherwise the **email date**. For a forward the email date is when the *original*
@@ -128,9 +128,9 @@ was sent, not when it was forwarded.
 
 | In the name | `{date}` |
 |---|---|
-| `0000000000_20261007.PDF`, `2026-10-02`, `25092026` (day-month-year), `18 SEP 2026` | that day, `2026-10-07` … |
-| `01Jul2026-31Jul2026`, `[2026-07-01 to 2026-10-01]` (a range) | the **later** date |
-| `Oct_2026`, `SEPTEMBER 2026`, `202610` (month only) | `2026-10` (no day) |
+| `0000000000_20261007.PDF`, `2026-10-02`, `25092026` (day-month-year), `18 SEP 2026` | that day, `2026.10.07` … |
+| `01Jul2026-31Jul2026`, `[2026-07-01 to 2026-10-01]` (a range) | the **later** date (`2026.10.01` …) |
+| `Oct_2026`, `SEPTEMBER 2026`, `202610` (month only) | `2026.10` (no day) |
 | nothing recognisable (`FNB PREMIER CREDIT 566.pdf`) | email date |
 
 Per account: `statements.date_source: "email"` forces the email date; `statements.filename_template`
