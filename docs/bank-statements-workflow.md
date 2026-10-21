@@ -213,7 +213,7 @@ Run Summary email still counts what was intended. Nothing is deleted unless `pur
 **Other mailboxes (temporary).** The workflow has two extra, normally idle entry points: **Manual Scan Pete** and
 **Manual Scan Julia** (each: trigger → Scan → Tag → Match). To use one:
 1. **Pete:** the nodes already use the credential *Gmail - pete@vanheerden.ch*. **Julia:** create a Gmail OAuth2 credential signed in as Julia, and select it on **Scan Julia** and the *Julia* nodes (Create/List Labels, Mark, Trash); they have no credential until you do.
-2. Adjust the search on the Scan node (default: PDF attachments from the last 90 days, not yet labelled `Statements/Filed`, max 100).
+2. Adjust the search on the Scan node. Default: PDF attachments, not yet labelled `statements-filed`, from the senders (and Gmail labels `Julia`/`Rob`) used in the `match` rules, max 500 messages (Pete: last 365 days, Julia: last 180). The sender list is a one-off snapshot for catching up on history: new senders go into the account's `match` rule and the Gmail Trigger query, not into these scans.
 3. Open the **Manual Scan Pete** node and execute from it. Results go through the same matching, filing, skipping and summary email as a normal scan; emails are labelled (and trashed where `purge_email` is set) **in that user's mailbox**.
 4. When finished: delete the credential in n8n (if it was only for this) and revoke the app in that Google account (myaccount.google.com → Security → third-party apps). Google refresh tokens do not expire on their own, so revoking is what ends the access.
 `julia` works the same way.

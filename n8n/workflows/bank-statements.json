@@ -381,11 +381,12 @@
         "parameters": {
           "resource": "message",
           "operation": "getAll",
-          "returnAll": true,
+          "returnAll": false,
+          "limit": 500,
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf newer_than:365d -label:statements-filed"
+            "q": "has:attachment filename:pdf {from:@ballitoaccommodation.co.za from:IH_ReturnEmail@discovery.co.za from:communications@mail.wio.io from:dailyclaims_noreply@discovery.co.za from:dco_oncology@discovery.co.za from:estatement@adcb.com from:estatement@emiratesislamic.ae from:estatements@cbdstatements.ae from:fnbcheque@fnbstatements.co.za from:greaterambers.com from:noreply@fnb.co.za from:noreply@maxprop.solutions from:statement@emiratesnbd.com from:statements@kwadukuza.gov.za from:umngeni@insidedata.co.za from:weconnectu.co.za label:Julia label:Rob} newer_than:365d -label:statements-filed"
           },
           "options": {
             "downloadAttachments": true
@@ -432,7 +433,7 @@
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "has:attachment filename:pdf newer_than:180d -label:statements-filed"
+            "q": "has:attachment filename:pdf {from:@ballitoaccommodation.co.za from:IH_ReturnEmail@discovery.co.za from:communications@mail.wio.io from:dailyclaims_noreply@discovery.co.za from:dco_oncology@discovery.co.za from:estatement@adcb.com from:estatement@emiratesislamic.ae from:estatements@cbdstatements.ae from:fnbcheque@fnbstatements.co.za from:greaterambers.com from:noreply@fnb.co.za from:noreply@maxprop.solutions from:statement@emiratesnbd.com from:statements@kwadukuza.gov.za from:umngeni@insidedata.co.za from:weconnectu.co.za label:Julia label:Rob} newer_than:180d -label:statements-filed"
           },
           "options": {
             "downloadAttachments": true
