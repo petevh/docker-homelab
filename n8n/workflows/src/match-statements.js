@@ -14,6 +14,13 @@
 // A rule with no fields never matches. If several accounts match, the one with the
 // most matching fields wins. Emails that match nothing are dropped.
 //
+// A rule may also carry "by_password": true. It is a last resort for accounts that
+// nothing in the email can tell apart (two people's SAVINGS ACCOUNT n.pdf): it is only
+// used when no ordinary rule of any account matched. If one account's by_password rule
+// matches it gets the file; if several do, the PDF is sent to the sidecar's /identify and
+// the account whose own password opens it gets the file. If that does not settle on exactly
+// one account the PDF is treated as unmatched.
+//
 // Forwards from TRUSTED_FORWARDERS are unwrapped: the original sender, subject and
 // recipient are read from the "Forwarded message" block, so a one-off manual forward
 // is matched exactly as the original email would have been.
@@ -43,7 +50,12 @@ function ruleScore(r, mail) {
 // Best score across an account's rules (0 = no match). For link emails there is
 // no attachment, so a rule that needs a filename cannot apply.
 const score = (m, mail, noFilename) =>
-  Math.max(0, ...asRules(m).map((r) => (noFilename && (r.filename || '').trim() ? 0 : ruleScore(r, mail))));
+  Math.max(0, ...asRules(m).map((r) => (r.by_password || (noFilename && (r.filename || '').trim()) ? 0 : ruleScore(r, mail))));
+// The accounts with a by_password rule that matches this mail.
+const passwordCandidates = (mail) =>
+  Object.entries(accounts)
+    .filter(([, a]) => asRules(a.match).some((r) => r.by_password && ruleScore(r, mail) > 0))
+    .map(([k]) => k);
 
 const hdr = (v, alt) =>
   [
@@ -192,9 +204,33 @@ function dateFromText(text) {
 // subject; {original} the original file name without its .pdf extension (the email
 // subject for link statements). Keep {original} (or something equally unique) in a
 // template: same-named files replace each other. ".pdf" is always appended.
+//
+// `statements.sequence` is for statements whose file name has a running number and no
+// date (FNB online banking: "FNB PREMIER CREDIT 566.pdf"). One known point fixes the
+// rest, one statement per month: { "anchor": { "number": 566, "month": "2026-09" },
+// "regex": "(\\d+)\\.pdf$" } (regex optional, default: the number at the end of the name). The month
+// is the one the statement is filed under (a card statement issued in the first week of
+// October covers, and is named for, September), so {date} becomes "2026.09" and {year} and
+// {month} follow. It takes the place of the date found in the name or the email date.
 const DEFAULT_TEMPLATE = '{date}_{key}_{original}';
+function dateFromSequence(seq, originalName) {
+  const a = seq && seq.anchor;
+  const base = a && /^(\d{4})-(\d{2})$/.exec(String(a.month || ''));
+  if (!base || !Number.isInteger(a.number)) return '';
+  let n;
+  try {
+    n = new RegExp(seq.regex || '(\\d+)(?:\\.pdf)?$', 'i').exec(String(originalName || ''));
+  } catch (e) {
+    return '';
+  }
+  if (!n || !/^\d+$/.test(n[1])) return '';
+  const idx = +base[1] * 12 + (+base[2] - 1) + (parseInt(n[1], 10) - a.number);
+  const y = Math.floor(idx / 12);
+  if (y < 2000 || y > 2100) return '';
+  return `${y}-${String((idx % 12) + 1).padStart(2, '0')}`;
+}
 function tokensFor(cfg, account, emailDate, originalName, subject) {
-  const found = cfg.date_source === 'email' ? '' : dateFromText(originalName);
+  const found = dateFromSequence(cfg.sequence, originalName) || (cfg.date_source === 'email' ? '' : dateFromText(originalName));
   const date = found || emailDate;
   return {
     // file names use periods (2026.10.07); year/month are cut from the ISO form first
@@ -213,7 +249,7 @@ const out = [];
 // Emails from the hourly Gmail Trigger or the manual Scan Inbox (whichever ran).
 const emails = $input.all();
 
-emails.forEach((item, index) => {
+for (const [index, item] of emails.entries()) await (async () => {
   const j = item.json;
   const body = j.text || stripTags(j.html || j.textAsHtml || '');
   const mail0 = unwrapForward(
@@ -261,7 +297,7 @@ emails.forEach((item, index) => {
   let attached = false;
   let pdfCount = 0;
   const emitted = [];
-  for (const bin of Object.values(item.binary || {})) {
+  for (const [binKey, bin] of Object.entries(item.binary || {})) {
     const original = bin.fileName || 'statement.pdf';
     // judge by the attachment's real type/name: `original` falls back to 'statement.pdf' for unnamed
     // attachments (inline images), which must not count as a PDF
@@ -270,11 +306,30 @@ emails.forEach((item, index) => {
     pdfCount++;
 
     const mail = { ...mail0, filename: original };
-    const hit = Object.entries(accounts)
+    let hit = Object.entries(accounts)
       .map(([k, a]) => [k, a, score(a.match, mail, false)])
       .filter((x) => x[2] > 0)
       .sort((a, b) => b[2] - a[2])[0];
-    if (!hit) continue;
+    if (!hit) {
+      const candidates = passwordCandidates(mail);
+      let owner = candidates.length === 1 ? candidates[0] : '';
+      if (candidates.length > 1) {
+        const res = await this.helpers.httpRequest({
+          method: 'POST',
+          url: `http://pdf-decrypt:8080/identify?accounts=${candidates.map(encodeURIComponent).join(',')}`,
+          // base64 text: a Buffer body does not survive the hop out of the Code node sandbox
+          body: (await this.helpers.getBinaryDataBuffer(index, binKey)).toString('base64'),
+          headers: { 'Content-Type': 'text/plain' },
+          json: false,
+          timeout: 30000,
+        });
+        // the helper may hand back text, bytes or an already parsed object
+        const answer = typeof res === 'string' ? JSON.parse(res) : Buffer.isBuffer(res) ? JSON.parse(res.toString()) : res;
+        owner = (answer && answer.account) || '';
+      }
+      if (!owner) continue;
+      hit = [owner, accounts[owner], 1];
+    }
 
     const [account, cfg] = hit;
     const folder = folderOf(cfg, account);
@@ -313,6 +368,6 @@ emails.forEach((item, index) => {
     json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, mailbox, emailInfo, purge: !!cfg.purge_email, hasUnmatchedPdf: pdfCount > 0, subject: mail0.subject, from: mail0.from.trim(), viaLink: true, linkCandidates: urls },
     pairedItem: { item: index },
   });
-});
+})();
 
 return out;

@@ -46,7 +46,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | **Record Folder** | After a successful upload: add the file to the ledger (`state/filed-log.json`, via the sidecar's `POST /filed`) and record the folder id (and where the folder currently is). |
 | **Decrypt Error / Folder Error** | One failure line per file that could not be decrypted / uploaded. The rest of the run carries on. |
 | **Mail Outcome → Mailbox? → Prepare/Create Labels/List Labels/Expand/Mark/Purge?/Trash (per mailbox)** | Runs before the summary (n8n runs the node placed higher on the canvas first, so keep it above). Labels each handled email and trashes it when the account has `purge_email`. See 2.9. |
-| **Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed** | The Merge waits for every branch, so this runs once at the end. It emails (*Gmail - statements* → pete@vanheerden.ch) when something failed, or after any **manual scan** (full list of what was filed, marked new or replaced, plus failures). A scheduled/hourly run where everything worked sends nothing. If anything failed the run then ends red (**Run Failed**). A scan that matches no statements sends nothing. |
+| **Collect Results → Run Summary → Email Summary → Any Failures? → Run Failed** | The Merge waits for every branch, so this runs once at the end. It emails (*Gmail - statements* → pete@vanheerden.ch) when something failed, or after any **manual scan** (full list of what was filed, marked new or replaced, plus failures). A scheduled/hourly run where everything worked sends nothing. If anything failed the run then ends red (**Run Failed**), manual or scheduled. A scan that matches no statements sends nothing. |
 | **Bank statements: monthly summary** (separate workflow, `workflows/monthly-summary.json`, id `BankStmtMonthly001`) | On the 1st at 08:00 it emails the statements first filed in the previous month, per account, and the accounts that had none. **Manual Run** sends the same for the previous month on demand. Reads the ledger from the sidecar (`GET /filed?month=YYYY-MM`). |
 | **pdf-decrypt sidecar** | qpdf over HTTP. Holds the passwords so they never appear in n8n execution data. Internal only (no Traefik labels), runs read-only as uid 3000. |
 
@@ -64,6 +64,13 @@ Each account has `statements.match`: one rule `{from, to, subject, filename}` or
   **Manual Scan Pete/Julia** look the label names up first (the *Labels …* node); the hourly Gmail Trigger does not,
   so a `label` rule never matches there (use a `to` address and a forwarding filter for ongoing mail).
   Typical use: `[ {from, to: "rob@", filename}, {from, label: "Rob", filename} ]`, any rule may match.
+- `by_password: true` (on a rule): a last resort for accounts nothing in the email can tell apart, such as two people's
+  `SAVINGS ACCOUNT n.pdf`. It is only used when no ordinary rule of any account matched. If one account's `by_password`
+  rule matches, that account gets the file. If several do, the matcher sends the PDF to the sidecar (`POST /identify`)
+  and the account whose own password opens it gets the file. If no password, or more than one, opens it, the PDF stays
+  unmatched. The PDF is decrypted once more afterwards, as usual, by the account it was given to; this happens only
+  for the files that fall through to this rule. It needs different passwords per account.
+  Typical use: add `{from, filename, by_password: true}` to each of the accounts that share the file name.
 - `subject`, `filename`: case-insensitive *regular expression*.
 - Empty fields are ignored; every non-empty field of a rule must match; a rule with no fields never matches.
 - With a list, any rule may match. The account with the **most matching fields** wins; ties go to
@@ -116,6 +123,12 @@ filed and you get an alert email; the other files in the run are still processed
 Fix the password (or pause the account's rule), then run Manual Scan.
 Unencrypted PDFs pass through unchanged.
 
+**Telling accounts apart by password** (`POST /identify?accounts=A,B`): for files nothing in the email can
+attribute (two people's `SAVINGS ACCOUNT n.pdf`), see `by_password` in 2.1. The sidecar tries each candidate
+account's own passwords and answers with the one that opens the PDF (`account`), or an empty answer if none or
+several do (or the PDF opens without a password). Each call logs `identify A,B -> KEY|nobody`. All candidate
+accounts need a password in `statement-passwords.json`, and the passwords must differ.
+
 Response header `X-Password-Index`: `-1` not encrypted, `-2` encrypted but needed no password,
 `0..n` index of the password list entry that worked. It never contains the password.
 
@@ -131,7 +144,14 @@ was sent, not when it was forwarded.
 | `0000000000_20261007.PDF`, `2026-10-02`, `25092026` (day-month-year), `18 SEP 2026` | that day, `2026.10.07` … |
 | `01Jul2026-31Jul2026`, `[2026-07-01 to 2026-10-01]` (a range) | the **later** date (`2026.10.01` …) |
 | `Oct_2026`, `SEPTEMBER 2026`, `202610` (month only) | `2026.10` (no day) |
-| nothing recognisable (`FNB PREMIER CREDIT 566.pdf`) | email date |
+| nothing recognisable | email date, unless the account has a `sequence` (below) |
+
+**Sequence numbers** (`statements.sequence`): FNB online-banking backlog statements carry a running number
+and no date (`FNB PREMIER CREDIT 566.pdf`). One known point fixes the rest, one statement per month:
+`"sequence": { "anchor": { "number": 566, "month": "2026-09" } }` (optional `"regex"`, default: the number at the
+end of the name). The month is the one the statement is filed under: a credit card statement issued in the
+first week of October covers, and is named for, September; current and savings statements issued near month end
+are named for that month. `{date}` becomes `2026.09`. If the bank skips a month the numbering drifts from the calendar.
 
 Per account: `statements.date_source: "email"` forces the email date; `statements.filename_template`
 replaces the whole pattern. Tokens: `{date} {emaildate} {year} {month} {key} {name} {subject} {original}`
@@ -187,13 +207,16 @@ Before each upload the workflow asks OneDrive whether a file with the target nam
 |---|---|
 | nothing with that name | uploaded (never with overwrite: `conflictBehavior=fail`) |
 | same name, **same size** | **skipped**, listed under SKIPPED in the manual-scan email; not added to the ledger |
-| same name, **different size** | **not filed** and the existing file is left alone: listed as a failure ("already exists with different content, existing N bytes, new M bytes"), alert email, run ends red. If the new one is right, delete or rename the old file and run Manual Scan. |
+| same name, **different size** | the existing file is left alone and the new one is filed as **`<name> (2).pdf`**, with a note under FILED in the summary email ("a different file already had the original name": compare the two). The `(2)` name is judged the same way: free → uploaded, same size → skipped (so a re-scan makes no third copy), a third, different file → **not filed**, listed as a failure. |
 | could not check (timeout/error, 5 tries) | upload is tried anyway; if the name turns out to exist, OneDrive refuses ("The specified item name already exists") and the file is listed as **skipped (exists; the check timed out so it was not compared)**, not as a failure; its email counts as filed |
 
 This applies to hourly runs and manual scans alike, so a bank re-sending a statement does not create copies and a
 corrected statement is never silently overwritten or lost. Size, not a hash, is compared (n8n's Code node cannot
-hash); the same statement decrypts to the same bytes. No `(2)` copies are created, because a re-scan would then
-make another copy every time; if you want a corrected statement filed next to the original, rename the old one.
+hash); the same statement decrypts to the same bytes. One Graph `$batch` call (**Check Existing**) asks about both
+the name and its `(2)` variant, so the extra check costs no extra request.
+
+HTTP timeouts (so a stalled connection fails and retries instead of hanging for minutes): Check Existing 30 s,
+Upload to OneDrive 60 s, Decrypt PDF 90 s (3 tries), the Gmail label/mark/trash calls 30 s (Mark: 3 tries).
 
 ### 2.9 Marking and cleaning up the emails
 After every run **Mail Outcome** looks at each email that was handled and marks it in the mailbox it came from
@@ -267,6 +290,11 @@ container looking at the old inode → `docker compose restart pdf-decrypt`).
 4. **Import deactivates the workflow.** In n8n 2.x re-activate with **Publish** (top right of the editor).
    (CLI alternative: `n8n update:workflow --id=BankStmtGmail001 --active=true` + restart n8n, which also
    restarts the other active workflows.)
+5. **Restart n8n after Publish** (`docker restart n8n`). Without it, polling triggers registered by earlier
+   imports and publishes can stay alive in the running process and fire with old copies of the workflow, all at
+   once, on the same emails (seen on 23 Oct 2026: four overlapping runs, three of them old versions, failing with
+   connection resets and filing files under the wrong names). Check afterwards that each run's snapshot is the
+   version you published.
 
 ### Running it
 - **Hourly**: published workflow, Gmail Trigger.
@@ -311,6 +339,7 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
 | Link statement not fetched | Account lacks `link.enabled`, link host not in `allow_hosts`, or the response wasn't a PDF (the error lists each attempt). |
 | Alert email: `could not be decrypted: this PDF needs a password but none is set…` | The account has no entry in `statement-passwords.json`. |
 | Alert email: `could not be decrypted … invalid password (tried N)` | Missing/wrong password for that account. Only that file is skipped; fix `statement-passwords.json`, then Manual Scan. |
+| Savings (or other `by_password`) files not filed; sidecar log says `identify … -> nobody` | A candidate account has no password in `statement-passwords.json` (`has_password: false` in `/accounts`), the passwords are identical, or the PDF opens without one. |
 | Zero matches although emails arrive | Check the sidecar is up (`docker ps`) — Match fetches `/accounts` itself and fails loudly if it can't. |
 | `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). A 404 on a folder id: see 2.6. |
 | Sidecar can't read config | The bind mount points at a replaced file → restart `pdf-decrypt`. |

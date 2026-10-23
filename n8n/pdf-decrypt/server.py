@@ -16,8 +16,13 @@ account key, so passwords never show up in n8n execution data.
                                current onedrive_folder (state file, see below)
   POST /decrypt?account=KEY    body = PDF, response = decrypted PDF
                                (unencrypted PDFs are returned unchanged)
+  POST /identify?accounts=A,B  body = PDF -> {owners: [keys whose password opens it],
+                               account: the key if exactly one, else ""}. Used by the
+                               matcher to tell accounts apart when nothing else can. The body may be
+                               base64 text (Content-Type: text/plain) instead of raw bytes.
 """
 
+import base64
 import json
 import os
 import re
@@ -160,6 +165,7 @@ def load_banks():
                 "link": st.get("link", {}),
                 "filename_template": st.get("filename_template", ""),
                 "date_source": st.get("date_source", ""),
+                "sequence": st.get("sequence", {}),
                 "purge_email": bool(st.get("purge_email", False)),
                 "has_password": any(as_list(passwords.get(key, st.get("decryption_password", "")))),
                 "name": acct.get("name", ""),
@@ -232,6 +238,26 @@ def decrypt(pdf, passwords):
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
+def identify(pdf, banks, candidates):
+    """Which of `candidates` (account keys) owns this PDF? The one whose password opens it.
+
+    Returns the list of keys whose own password list opened the PDF. A PDF that is not
+    encrypted, or that opens with no password, says nothing about its owner, so the answer
+    is then empty. The caller treats anything but exactly one key as "cannot tell".
+    """
+    owners = []
+    for key in candidates:
+        try:
+            _, _, used = decrypt(pdf, banks[key].get("decryption_password", ""))
+        except DecryptError as e:
+            if e.status == 422:  # wrong or missing password for this account
+                continue
+            raise
+        if used >= 0:
+            owners.append(key)
+    return owners
+
+
 def log_folder_change(account, previous, folder_id, seen_path):
     """One line per change worth knowing about, in `docker logs n8n-pdf-decrypt`."""
     old_path = previous.get("seen_path", "")
@@ -281,6 +307,7 @@ class Handler(BaseHTTPRequestHandler):
                     "link": bank.get("link", {}),
                     "filename_template": bank.get("filename_template", ""),
                     "date_source": bank.get("date_source", ""),
+                    "sequence": bank.get("sequence", {}),
                     "purge_email": bank.get("purge_email", False),
                     "has_password": bank.get("has_password", False),  # whether one is on file, never the value
                     "name": bank.get("name", ""),
@@ -317,6 +344,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/folder-id":
             self.record_folder_id(parse_qs(url.query).get("account", [""])[0])
             return
+        if url.path == "/identify":
+            self.identify_owner(parse_qs(url.query).get("accounts", [""])[0])
+            return
         if url.path != "/decrypt":
             self.send_json(404, {"error": "not found"})
             return
@@ -346,6 +376,38 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Password-Index", str(used))
         self.end_headers()
         self.wfile.write(out)
+
+    def identify_owner(self, accounts):
+        keys = [k for k in accounts.split(",") if k]
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 2 <= len(keys) <= 8:
+            self.send_json(400, {"error": "accounts must list 2 to 8 account keys"})
+            return
+        if length <= 0 or length > MAX_BODY:
+            self.send_json(413 if length > MAX_BODY else 400, {"error": "bad body size"})
+            return
+        pdf = self.rfile.read(length)
+        if self.headers.get("Content-Type", "").startswith("text/plain"):
+            # n8n's Code node cannot pass binary through its request helper, so it sends base64 text
+            try:
+                pdf = base64.b64decode(pdf, validate=True)
+            except ValueError:
+                self.send_json(400, {"error": "body is not valid base64"})
+                return
+        try:
+            banks = load_banks()
+            unknown = [k for k in keys if k not in banks]
+            if unknown:
+                raise DecryptError(404, f"unknown account '{unknown[0]}'")
+            owners = identify(pdf, banks, keys)
+        except DecryptError as e:
+            self.send_json(e.status, {"error": e.message})
+            return
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            self.send_json(500, {"error": str(e)})
+            return
+        print(f"identify {','.join(keys)} -> {','.join(owners) or 'nobody'}", flush=True)
+        self.send_json(200, {"owners": owners, "account": owners[0] if len(owners) == 1 else ""})
 
     def record_filed_files(self):
         length = int(self.headers.get("Content-Length", "0"))

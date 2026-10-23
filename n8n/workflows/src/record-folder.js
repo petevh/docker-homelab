@@ -16,7 +16,8 @@ const seenPathOf = (ref) => {
 const out = [];
 const items = $input.all();
 for (let i = 0; i < items.length; i++) {
-  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;
+  const dec = $('Decide').itemMatching(i).json;
+  const ctx = { ...$('Fetch Linked PDFs').itemMatching(i).json, fileName: dec.fileName };
   const ref = items[i].json.parentReference || {};
   const seenPath = seenPathOf(ref);
   const result = {
@@ -26,6 +27,7 @@ for (let i = 0; i < items.length; i++) {
     folderSource: ctx.folderSource,
     recorded: false,
     filed: true,
+    variant: dec.variant || 0,
     isNew: false,
     messageId: ctx.messageId,
     mailbox: ctx.mailbox,

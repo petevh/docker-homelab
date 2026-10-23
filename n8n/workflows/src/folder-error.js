@@ -13,7 +13,7 @@
 const rows = [];
 const items = $input.all();
 for (let i = 0; i < items.length; i++) {
-  const ctx = $('Fetch Linked PDFs').itemMatching(i).json;
+  const ctx = { ...$('Fetch Linked PDFs').itemMatching(i).json, fileName: $('Decide').itemMatching(i).json.fileName };
   const err = items[i].json.error || items[i].json;
   // the HTTP node does not always carry a status code, so fall back to the message text
   const status =

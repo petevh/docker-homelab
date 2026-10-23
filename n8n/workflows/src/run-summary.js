@@ -31,7 +31,10 @@ if (marked.length) {
       `, ${marked.length - ok.length} labelled Statements/Failed.`,
   );
 }
-if (filed.length) parts.push('FILED\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\n    -> ${j.folder}`).join('\n'));
+if (filed.length) {
+  parts.push('FILED\n' + filed.map((j) => `- ${j.account}: ${j.fileName}\n    -> ${j.folder}` +
+    (j.variant ? '\n    (a different file already had the original name, so this one is saved as a (2) copy: compare the two)' : '')).join('\n'));
+}
 if (skipped.length) {
   parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}${j.uncompared ? '  (exists; the check timed out so it was not compared)' : ''}`).join('\n'));
 }
@@ -54,6 +57,7 @@ return [
       subject,
       body: parts.join('\n\n'),
       failed: failures.length,
+      manual,
       failureText: failures.map((j) => j.line).join('\n\n'),
     },
   },
