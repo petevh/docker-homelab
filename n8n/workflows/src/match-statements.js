@@ -14,12 +14,13 @@
 // A rule with no fields never matches. If several accounts match, the one with the
 // most matching fields wins. Emails that match nothing are dropped.
 //
-// A rule may also carry "by_password": true. It is a last resort for accounts that
+// A rule may also carry "by_content": "regex". It is a last resort for accounts that
 // nothing in the email can tell apart (two people's SAVINGS ACCOUNT n.pdf): it is only
-// used when no ordinary rule of any account matched. If one account's by_password rule
-// matches it gets the file; if several do, the PDF is sent to the sidecar's /identify and
-// the account whose own password opens it gets the file. If that does not settle on exactly
-// one account the PDF is treated as unmatched.
+// used when no ordinary rule of any account matched. If one account's by_content rule
+// matches the email, that account gets the file; if several do, the PDF is sent to the
+// sidecar's /identify and the account whose by_content regex is found in the PDF's text
+// (e.g. the holder's name) gets the file. If that does not settle on exactly one account
+// the PDF is treated as unmatched.
 //
 // Forwards from TRUSTED_FORWARDERS are unwrapped: the original sender, subject and
 // recipient are read from the "Forwarded message" block, so a one-off manual forward
@@ -50,11 +51,11 @@ function ruleScore(r, mail) {
 // Best score across an account's rules (0 = no match). For link emails there is
 // no attachment, so a rule that needs a filename cannot apply.
 const score = (m, mail, noFilename) =>
-  Math.max(0, ...asRules(m).map((r) => (r.by_password || (noFilename && (r.filename || '').trim()) ? 0 : ruleScore(r, mail))));
-// The accounts with a by_password rule that matches this mail.
-const passwordCandidates = (mail) =>
+  Math.max(0, ...asRules(m).map((r) => (r.by_content || (noFilename && (r.filename || '').trim()) ? 0 : ruleScore(r, mail))));
+// The accounts with a by_content rule that matches this mail.
+const contentCandidates = (mail) =>
   Object.entries(accounts)
-    .filter(([, a]) => asRules(a.match).some((r) => r.by_password && ruleScore(r, mail) > 0))
+    .filter(([, a]) => asRules(a.match).some((r) => r.by_content && ruleScore(r, mail) > 0))
     .map(([k]) => k);
 
 const hdr = (v, alt) =>
@@ -311,7 +312,7 @@ for (const [index, item] of emails.entries()) await (async () => {
       .filter((x) => x[2] > 0)
       .sort((a, b) => b[2] - a[2])[0];
     if (!hit) {
-      const candidates = passwordCandidates(mail);
+      const candidates = contentCandidates(mail);
       let owner = candidates.length === 1 ? candidates[0] : '';
       if (candidates.length > 1) {
         const res = await this.helpers.httpRequest({

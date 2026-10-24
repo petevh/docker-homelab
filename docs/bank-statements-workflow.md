@@ -64,13 +64,14 @@ Each account has `statements.match`: one rule `{from, to, subject, filename}` or
   **Manual Scan Pete/Julia** look the label names up first (the *Labels …* node); the hourly Gmail Trigger does not,
   so a `label` rule never matches there (use a `to` address and a forwarding filter for ongoing mail).
   Typical use: `[ {from, to: "rob@", filename}, {from, label: "Rob", filename} ]`, any rule may match.
-- `by_password: true` (on a rule): a last resort for accounts nothing in the email can tell apart, such as two people's
-  `SAVINGS ACCOUNT n.pdf`. It is only used when no ordinary rule of any account matched. If one account's `by_password`
-  rule matches, that account gets the file. If several do, the matcher sends the PDF to the sidecar (`POST /identify`)
-  and the account whose own password opens it gets the file. If no password, or more than one, opens it, the PDF stays
-  unmatched. The PDF is decrypted once more afterwards, as usual, by the account it was given to; this happens only
-  for the files that fall through to this rule. It needs different passwords per account.
-  Typical use: add `{from, filename, by_password: true}` to each of the accounts that share the file name.
+- `by_content: "regex"` (on a rule): a last resort for accounts nothing in the email can tell apart, such as two
+  people's `SAVINGS ACCOUNT n.pdf`. It is only used when no ordinary rule of any account matched. If one account's
+  `by_content` rule matches the email, that account gets the file. If several do, the matcher sends the PDF to the
+  sidecar (`POST /identify`), which reads the PDF's text and answers with the account whose `by_content` regex is
+  found in it (case-insensitive), typically the account holder's name as printed on the statement. If none, or more
+  than one, is found, the PDF stays unmatched. The PDF is decrypted again afterwards, as usual, by the account it
+  was given to; this happens only for the files that fall through to this rule.
+  Typical use: add `{from, filename, by_content: "HOLDER NAME"}` to each of the accounts that share the file name.
 - `subject`, `filename`: case-insensitive *regular expression*.
 - Empty fields are ignored; every non-empty field of a rule must match; a rule with no fields never matches.
 - With a list, any rule may match. The account with the **most matching fields** wins; ties go to
@@ -123,11 +124,12 @@ filed and you get an alert email; the other files in the run are still processed
 Fix the password (or pause the account's rule), then run Manual Scan.
 Unencrypted PDFs pass through unchanged.
 
-**Telling accounts apart by password** (`POST /identify?accounts=A,B`): for files nothing in the email can
-attribute (two people's `SAVINGS ACCOUNT n.pdf`), see `by_password` in 2.1. The sidecar tries each candidate
-account's own passwords and answers with the one that opens the PDF (`account`), or an empty answer if none or
-several do (or the PDF opens without a password). Each call logs `identify A,B -> KEY|nobody`. All candidate
-accounts need a password in `statement-passwords.json`, and the passwords must differ.
+**Telling accounts apart by content** (`POST /identify?accounts=A,B`): for files nothing in the email can
+attribute (two people's `SAVINGS ACCOUNT n.pdf`), see `by_content` in 2.1. The sidecar decrypts the PDF and
+searches its text (the literal strings of the page content; works for FNB's statements, not for PDFs with custom
+glyph encodings) for each candidate's `by_content` regex, and answers with the one that is found (`account`), or an
+empty answer if none or several are. Each call logs `identify A,B -> KEY|nobody`. Trying the accounts' passwords
+instead does not work for FNB savings: those PDFs open without any password.
 
 Response header `X-Password-Index`: `-1` not encrypted, `-2` encrypted but needed no password,
 `0..n` index of the password list entry that worked. It never contains the password.
@@ -339,7 +341,7 @@ docker exec -i n8n node - 357 < n8n/tools/last-run.js    # a given execution id
 | Link statement not fetched | Account lacks `link.enabled`, link host not in `allow_hosts`, or the response wasn't a PDF (the error lists each attempt). |
 | Alert email: `could not be decrypted: this PDF needs a password but none is set…` | The account has no entry in `statement-passwords.json`. |
 | Alert email: `could not be decrypted … invalid password (tried N)` | Missing/wrong password for that account. Only that file is skipped; fix `statement-passwords.json`, then Manual Scan. |
-| Savings (or other `by_password`) files not filed; sidecar log says `identify … -> nobody` | A candidate account has no password in `statement-passwords.json` (`has_password: false` in `/accounts`), the passwords are identical, or the PDF opens without one. |
+| Savings (or other `by_content`) files not filed; sidecar log says `identify … -> nobody` | The regex is not found in the PDF's text (the name is printed differently, or the PDF's text cannot be read), or it is found for both accounts. |
 | Zero matches although emails arrive | Check the sidecar is up (`docker ps`) — Match fetches `/accounts` itself and fails loudly if it can't. |
 | `PUT` to OneDrive fails | OneDrive credential (secret expired / needs reconnect). A 404 on a folder id: see 2.6. |
 | Sidecar can't read config | The bind mount points at a replaced file → restart `pdf-decrypt`. |

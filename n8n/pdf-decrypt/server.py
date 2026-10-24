@@ -16,9 +16,10 @@ account key, so passwords never show up in n8n execution data.
                                current onedrive_folder (state file, see below)
   POST /decrypt?account=KEY    body = PDF, response = decrypted PDF
                                (unencrypted PDFs are returned unchanged)
-  POST /identify?accounts=A,B  body = PDF -> {owners: [keys whose password opens it],
+  POST /identify?accounts=A,B  body = PDF -> {owners: [keys whose by_content regex matches],
                                account: the key if exactly one, else ""}. Used by the
-                               matcher to tell accounts apart when nothing else can. The body may be
+                               matcher to tell accounts apart when nothing else can: the key
+                               whose `by_content` regex is found in the PDF's text. The body may be
                                base64 text (Content-Type: text/plain) instead of raw bytes.
 """
 
@@ -238,23 +239,56 @@ def decrypt(pdf, passwords):
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
-def identify(pdf, banks, candidates):
-    """Which of `candidates` (account keys) owns this PDF? The one whose password opens it.
+def pdf_text(pdf):
+    """Text shown in a (decrypted) PDF, one string per text-showing operator; '' if none found.
 
-    Returns the list of keys whose own password list opened the PDF. A PDF that is not
-    encrypted, or that opens with no password, says nothing about its owner, so the answer
-    is then empty. The caller treats anything but exactly one key as "cannot tell".
+    Reads the literal strings of Tj/TJ operators from the uncompressed form qpdf writes. That is
+    enough for statements whose fonts use plain character codes (FNB's); PDFs with custom glyph
+    encodings give no text, and the caller then cannot tell the accounts apart.
     """
-    owners = []
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "in.pdf")
+        dst = os.path.join(tmp, "out.pdf")
+        with open(src, "wb") as f:
+            f.write(pdf)
+        if qpdf("--qdf", "--object-streams=disable", src, dst).returncode not in (0, 3):
+            return ""
+        with open(dst, "rb") as f:
+            data = f.read()
+    lines = []
+    for arr in re.findall(rb"\[(.*?)\]\s*TJ", data, re.S) + re.findall(rb"(\((?:\\.|[^\\()])*\))\s*Tj", data):
+        parts = re.findall(rb"\(((?:\\.|[^\\()])*)\)", arr)
+        lines.append(b"".join(parts).decode("latin-1"))
+    return "\n".join(lines)
+
+
+def identify(pdf, banks, candidates):
+    """Which of `candidates` (account keys) does this PDF belong to?
+
+    Decrypts the PDF with the candidates' passwords (statements that open without one are
+    fine), reads its text and returns the keys with a `by_content` regex in their match rules
+    that is found in it (case-insensitive), e.g. the account holder's name. The caller treats
+    anything but exactly one key as "cannot tell".
+    """
+    opened = None
     for key in candidates:
         try:
-            _, _, used = decrypt(pdf, banks[key].get("decryption_password", ""))
+            opened = decrypt(pdf, banks[key].get("decryption_password", ""))[0]
+            break
         except DecryptError as e:
-            if e.status == 422:  # wrong or missing password for this account
-                continue
-            raise
-        if used >= 0:
-            owners.append(key)
+            if e.status != 422:
+                raise
+    if opened is None:
+        return []
+    text = pdf_text(opened)
+    owners = []
+    for key in candidates:
+        rules = banks[key].get("match", {})
+        for rule in rules if isinstance(rules, list) else [rules]:
+            pattern = rule.get("by_content") if isinstance(rule, dict) else None
+            if pattern and re.search(pattern, text, re.I):
+                owners.append(key)
+                break
     return owners
 
 
