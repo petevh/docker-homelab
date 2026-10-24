@@ -255,7 +255,8 @@ function nameFor(template, tokens) {
   const s = safeName(
     (template || DEFAULT_TEMPLATE).replace(/\{(\w+)\}/g, (m, k) => (k in tokens ? tokens[k] : m)),
   );
-  return /\.pdf$/i.test(s) ? s : `${s}.pdf`;
+  const clean = s.replace(/_{2,}/g, '_');
+  return /\.pdf$/i.test(clean) ? clean : `${clean}.pdf`;
 }
 const out = [];
 

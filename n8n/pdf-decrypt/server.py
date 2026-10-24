@@ -171,6 +171,7 @@ def load_banks():
                 "link": st.get("link", {}),
                 "filename_template": st.get("filename_template", ""),
                 "date_source": st.get("date_source", ""),
+                "month_offset": st.get("month_offset", 0),
                 "sequence": st.get("sequence", {}),
                 "purge_email": bool(st.get("purge_email", False)),
                 "has_password": any(as_list(passwords.get(key, st.get("decryption_password", "")))),
@@ -347,6 +348,7 @@ class Handler(BaseHTTPRequestHandler):
                     "link": bank.get("link", {}),
                     "filename_template": bank.get("filename_template", ""),
                     "date_source": bank.get("date_source", ""),
+                    "month_offset": bank.get("month_offset", 0),
                     "sequence": bank.get("sequence", {}),
                     "purge_email": bank.get("purge_email", False),
                     "has_password": bank.get("has_password", False),  # whether one is on file, never the value
