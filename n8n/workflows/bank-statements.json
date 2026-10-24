@@ -149,11 +149,11 @@
           "resource": "message",
           "operation": "getAll",
           "returnAll": false,
-          "limit": 100,
+          "limit": 500,
           "simple": false,
           "filters": {
             "includeSpamTrash": false,
-            "q": "{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za} newer_than:30d -label:statements-filed"
+            "q": "{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za} newer_than:365d -label:statements-filed"
           },
           "options": {
             "downloadAttachments": true

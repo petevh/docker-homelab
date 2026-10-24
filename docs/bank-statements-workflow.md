@@ -16,7 +16,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
  statements@vanheerden.ch (Gmail)
         │  hourly poll                         manual: click "Execute workflow"
         ▼                                              │
-  Gmail Trigger ───────────────┐          Manual Scan → Scan Inbox (last 30 days)
+  Gmail Trigger ───────────────┐          Manual Scan → Scan Inbox (last 365 days)
                                ▼                       │
                         Match Statements ◄─────────────┘
               (rules from  GET pdf-decrypt:8080/accounts)
@@ -305,8 +305,8 @@ container looking at the old inode → `docker compose restart pdf-decrypt`).
 
 ### Running it
 - **Hourly**: published workflow, Gmail Trigger.
-- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Manual Scan reads the last 30 days
-  of the statements mailbox (up to 100 emails) and **skips emails labelled `Statements/Filed`** (as Manual Scan Pete / Julia
+- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Manual Scan reads the last 365 days
+  of the statements mailbox (up to 500 emails) and **skips emails labelled `Statements/Filed`** (as Manual Scan Pete / Julia
   do), so a normal run only touches new or failed mail. To force a rescan (new naming rules, say), remove the label
   from those emails in Gmail first; keep the batch small enough to stay under Gmail's rate limit. Re-running is safe: files that
   are already in OneDrive are skipped (2.8), nothing is overwritten. If naming rules changed since the first upload,
