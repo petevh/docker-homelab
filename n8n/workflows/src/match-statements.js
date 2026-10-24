@@ -154,7 +154,8 @@ function linksOf(html, text, allow) {
 const safeName = (s) => s.replace(/[\\/:*?"<>|#%]/g, '_').trim();
 
 // The statement's own date, read from text such as the original file name.
-// Recognised: 2026-10-02 / 2026_10_02, 20261007, 25092026 (DDMMYYYY), 18 SEP 2026,
+// Recognised: 2026-10-02 / 2026_10_02, 20261007, 25092026 (DDMMYYYY), 05/09/2026 (DD/MM/YYYY,
+// day first), 18 SEP 2026,
 // 01Jul2026-31Jul2026 (a range: the later date), and month-only forms (Oct_2026,
 // SEPTEMBER 2026, 202610 -> "2026-10"). Returns "YYYY-MM-DD", "YYYY-MM" or ''.
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
@@ -176,6 +177,7 @@ function dateFromText(text) {
     if (s.startsWith('20')) add(full, s.slice(0, 4), s.slice(4, 6), s.slice(6, 8)); // YYYYMMDD
     if (full.length === before) add(full, s.slice(4, 8), s.slice(2, 4), s.slice(0, 2)); // DDMMYYYY
   }
+  for (const m of t.matchAll(/(?<!\d)(\d{2})\/(\d{2})\/(20\d{2})(?!\d)/g)) add(full, m[3], m[2], m[1]); // DD/MM/YYYY
   for (const m of t.matchAll(/(?<!\d)(\d{1,2})[ _-]?([A-Za-z]{3,9})[ _-]?(20\d{2})(?!\d)/g)) {
     const mo = MONTHS[m[2].slice(0, 3).toLowerCase()];
     if (mo) add(full, m[3], mo, m[1]);
