@@ -80,6 +80,9 @@ Each account has `statements.match`: one rule `{from, to, subject, filename}` or
 - **Attachment names are what n8n/Gmail report**, which differs from the name in the mail client:
   a `/` in a name truncates it to the part after the slash (the Amber levy file arrives as
   ` Van Heerden R._AND_J.pdf`). Check real names with the run tool (section 6) before writing a `filename` rule.
+  This is what `filename` rules match against. The saved name's `{original}` is rebuilt from n8n's `directory` +
+  `fileName` (n8n puts the part before the last `/` in `directory`), so it keeps the whole name with `/` shown as
+  `_` (`Mortgage Loans Statement - 05/09/2026.pdf` → `Mortgage Loans Statement - 05_09_2026`).
 
 ### 2.2 Forwarded emails
 For testing and for senders that deliver to another mailbox, a forward is matched as if it were the
