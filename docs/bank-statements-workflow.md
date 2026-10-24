@@ -305,7 +305,10 @@ container looking at the old inode → `docker compose restart pdf-decrypt`).
 
 ### Running it
 - **Hourly**: published workflow, Gmail Trigger.
-- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Re-running is safe: files that
+- **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Manual Scan reads the last 30 days
+  of the statements mailbox (up to 100 emails) and **skips emails labelled `Statements/Filed`** (as Manual Scan Pete / Julia
+  do), so a normal run only touches new or failed mail. To force a rescan (new naming rules, say), remove the label
+  from those emails in Gmail first; keep the batch small enough to stay under Gmail's rate limit. Re-running is safe: files that
   are already in OneDrive are skipped (2.8), nothing is overwritten. If naming rules changed since the first upload,
   the files are filed again under the new names and the old-named copies stay next to them.
 - **Bulk runs** (a rescan after removing labels, or a first run over a large mailbox) send ~100 items through every
