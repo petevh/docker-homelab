@@ -213,6 +213,11 @@ function dateFromText(text) {
 // is the one the statement is filed under (a card statement issued in the first week of
 // October covers, and is named for, September), so {date} becomes "2026.09" and {year} and
 // {month} follow. It takes the place of the date found in the name or the email date.
+//
+// `statements.month_offset` (integer, e.g. -1) moves whatever month {date} resolved to by that
+// many months, for statements issued in the month after the one they cover (ABSA: issued
+// in September, covers August). The day is dropped, so {date} becomes "2026.08". It applies
+// to the month from any source: file name, email date or sequence.
 const DEFAULT_TEMPLATE = '{date}_{key}_{original}';
 function dateFromSequence(seq, originalName) {
   const a = seq && seq.anchor;
@@ -232,7 +237,12 @@ function dateFromSequence(seq, originalName) {
 }
 function tokensFor(cfg, account, emailDate, originalName, subject) {
   const found = dateFromSequence(cfg.sequence, originalName) || (cfg.date_source === 'email' ? '' : dateFromText(originalName));
-  const date = found || emailDate;
+  let date = found || emailDate;
+  const off = cfg.month_offset;
+  if (Number.isInteger(off) && off !== 0 && /^\d{4}-\d{2}/.test(date)) {
+    const idx = +date.slice(0, 4) * 12 + (+date.slice(5, 7) - 1) + off;
+    date = `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
+  }
   return {
     // file names use periods (2026.10.07); year/month are cut from the ISO form first
     date: date.replace(/-/g, '.'), emaildate: emailDate.replace(/-/g, '.'), year: date.slice(0, 4), month: date.slice(5, 7),

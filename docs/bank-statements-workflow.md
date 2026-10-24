@@ -155,7 +155,9 @@ end of the name). The month is the one the statement is filed under: a credit ca
 first week of October covers, and is named for, September; current and savings statements issued near month end
 are named for that month. `{date}` becomes `2026.09`. If the bank skips a month the numbering drifts from the calendar.
 
-Per account: `statements.date_source: "email"` forces the email date; `statements.filename_template`
+Per account: `statements.month_offset: -1` shifts the resolved month back (or forward) by that many months and
+drops the day, for statements issued after the period they cover (ABSA: issued in September, covers August);
+`statements.date_source: "email"` forces the email date; `statements.filename_template`
 replaces the whole pattern. Tokens: `{date} {emaildate} {year} {month} {key} {name} {subject} {original}`
 (`{original}` has no extension; `.pdf` is always appended). Use `{subject}` when attachments have generic
 names (`Attachment.pdf`). Keep `{original}` or something equally unique: two files with the same final name
