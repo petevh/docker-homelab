@@ -310,6 +310,10 @@ for (const [index, item] of emails.entries()) await (async () => {
   const emitted = [];
   for (const [binKey, bin] of Object.entries(item.binary || {})) {
     const original = bin.fileName || 'statement.pdf';
+    // n8n splits a name at its last "/" into binary.directory + binary.fileName ("Statement - 05/09/2026.pdf"
+    // arrives as directory "Statement - 05/09", fileName "2026.pdf"). Rules still match the short fileName;
+    // the saved name uses the whole thing, with the slashes made safe by nameFor.
+    const fullName = bin.directory && bin.directory !== '.' ? `${bin.directory}/${original}` : original;
     // judge by the attachment's real type/name: `original` falls back to 'statement.pdf' for unnamed
     // attachments (inline images), which must not count as a PDF
     const isPdf = bin.mimeType === 'application/pdf' || /\.pdf$/i.test(bin.fileName || '');
@@ -345,7 +349,7 @@ for (const [index, item] of emails.entries()) await (async () => {
     const [account, cfg] = hit;
     const folder = folderOf(cfg, account);
     // Banks reuse the same attachment name every month, so the template carries the date.
-    const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, original, mail0.subject));
+    const fileName = nameFor(cfg.filename_template, tokensFor(cfg, account, day, fullName, mail0.subject));
     attached = true;
     const o = {
       json: { account, folder, fileName, uploadPath: pathOf(folder, fileName), ...targetOf(cfg, folder, fileName), messageId: j.id, mailbox, emailInfo, purge: !!cfg.purge_email, subject: mail0.subject, from: mail0.from.trim() },
