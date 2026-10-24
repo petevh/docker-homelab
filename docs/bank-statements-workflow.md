@@ -38,7 +38,7 @@ file. It does **not** (yet) read the contents of the PDFs or touch YNAB.
 | Piece | Role |
 |---|---|
 | **Gmail Trigger** | Polls hourly. Query: `{(has:attachment filename:pdf) from:pete@vanheerden.ch from:weconnectu.co.za}` (any PDF mail, anything forwarded by Pete, and ReMax link mails). Credential *Gmail - statements*. |
-| **Manual Scan / Scan Inbox** | Same query plus `newer_than:30d`, up to 100 emails. Works whether or not the workflow is published. Edit `newer_than` to widen the window. |
+| **Manual Scan / Scan Inbox** | Same query plus `newer_than:365d`, up to 500 emails. Works whether or not the workflow is published. Edit `newer_than` to widen the window. |
 | **Match Statements** | Decides which account each PDF belongs to and what to call it. Fetches the account list itself from the sidecar. |
 | **Fetch Linked PDFs** | For statements delivered as a download link: follows the link, keeps only a real PDF. Other items pass through. |
 | **Decrypt PDF** | Sends the PDF + account key to the sidecar. Its error output goes to **Decrypt Error**. |
