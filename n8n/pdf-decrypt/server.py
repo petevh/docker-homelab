@@ -46,6 +46,11 @@ FOLDER_IDS_PATH = os.environ.get("FOLDER_IDS_PATH", "/state/statement-folder-ids
 FILED_PATH = os.environ.get("FILED_PATH", "/state/filed-log.json")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_BODY = 50 * 1024 * 1024
+# A bulk scan sends ~100 PDFs at once. The default accept queue (5) drops connections under
+# that burst, so the client sees a reset or a timeout; keep it larger than any burst.
+LISTEN_BACKLOG = int(os.environ.get("LISTEN_BACKLOG", "256"))
+# qpdf runs per request thread; cap them so a burst queues instead of exhausting CPU/memory.
+QPDF_SLOTS = threading.BoundedSemaphore(int(os.environ.get("QPDF_CONCURRENCY", "4")))
 MAX_JSON_BODY = 16 * 1024
 MAX_FILED_BODY = 256 * 1024
 MAX_FILED_ENTRIES = 500
@@ -175,7 +180,8 @@ def load_banks():
 
 
 def qpdf(*args):
-    return subprocess.run(["qpdf", *args], capture_output=True, text=True, timeout=60)
+    with QPDF_SLOTS:
+        return subprocess.run(["qpdf", *args], capture_output=True, text=True, timeout=60)
 
 
 class DecryptError(Exception):
@@ -498,5 +504,10 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} {fmt % args}", flush=True)
 
 
+class Server(ThreadingHTTPServer):
+    request_queue_size = LISTEN_BACKLOG
+    daemon_threads = True
+
+
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    Server(("0.0.0.0", PORT), Handler).serve_forever()

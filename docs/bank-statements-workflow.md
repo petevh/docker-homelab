@@ -303,6 +303,13 @@ container looking at the old inode → `docker compose restart pdf-decrypt`).
 - **On demand**: open the workflow → **Execute workflow** (starts at Manual Scan). Re-running is safe: files that
   are already in OneDrive are skipped (2.8), nothing is overwritten. If naming rules changed since the first upload,
   the files are filed again under the new names and the old-named copies stay next to them.
+- **Bulk runs** (a rescan after removing labels, or a first run over a large mailbox) send ~100 items through every
+  step at once, which used to fail with `write ECONNRESET` (sidecar), "too many requests" (Gmail) and "connection
+  aborted" (Graph) even though each node retried. So the HTTP nodes are paced (Options → Batching: Decrypt PDF 8 per
+  0.5 s, Check Existing 5 and Upload 3 per second, Mark/Trash 10 per second), the Mark nodes retry 5× with a 15 s
+  wait, and the sidecar has a 256-connection accept queue (`LISTEN_BACKLOG`) and at most 4 concurrent qpdf runs
+  (`QPDF_CONCURRENCY`). A big run is slower but should complete. Do not start a second run while one is going: both
+  share the Gmail quota.
 
 ### Credentials that expire
 | Credential | Symptom | Cause / fix |
