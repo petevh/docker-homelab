@@ -25,7 +25,7 @@
 // Forwards from TRUSTED_FORWARDERS are unwrapped: the original sender, subject and
 // recipient are read from the "Forwarded message" block, so a one-off manual forward
 // is matched exactly as the original email would have been.
-const TRUSTED_FORWARDERS = ['pete@vanheerden.ch', 'julia@vanheerden.ch'];
+const TRUSTED_FORWARDERS = ['pete@vanheerden.ch', 'julia@vanheerden.ch', 'fiona@vanheerden.ch'];
 const MAX_LINKS = 15;
 
 // Account list (match rules, folders, link settings; no secrets) from the sidecar.
@@ -299,12 +299,12 @@ for (const [index, item] of emails.entries()) await (async () => {
     return { uploadUrl, folderSource: source, folderId, driveId, recordedPath: recorded.seen_path || '' };
   };
 
-  // Which mailbox the email came from (the Scan Pete/Julia branches tag it) and whether the account
+  // Which mailbox the email came from (the Scan Pete/Julia/Fiona branches tag it) and whether the account
   // wants its emails deleted once filed. An email with a PDF that matched no account must never be
   // purged: it may hold something else (a receipt, a tax invoice), so Mail Outcome checks the flag.
   const mailbox = j.mailbox || 'statements';
   // Says which email a file came from, for the failure/summary mails (open it in the right account)
-  const MAILBOXES = { statements: 'statements@vanheerden.ch', pete: 'pete@vanheerden.ch', julia: 'julia@vanheerden.ch' };
+  const MAILBOXES = { statements: 'statements@vanheerden.ch', pete: 'pete@vanheerden.ch', julia: 'julia@vanheerden.ch', fiona: 'fiona@vanheerden.ch' };
   const emailInfo =
     `"${(mail0.subject || '(no subject)').trim().slice(0, 90)}" from ${mail0.from.trim().slice(0, 80)}, ${receivedDay}, ${mailbox} mailbox ` +
     `https://mail.google.com/mail/?authuser=${MAILBOXES[mailbox] || ''}#all/${j.id}`;

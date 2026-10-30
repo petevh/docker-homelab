@@ -11,7 +11,7 @@ const byName = (a, b) => (a.account + a.fileName).localeCompare(b.account + b.fi
 const filed = rows.filter((j) => j.filed).sort(byName);
 const skipped = rows.filter((j) => j.skipped).sort(byName);
 const failures = rows.filter((j) => j.failure && j.line);
-const manual = ['Manual Scan', 'Manual Scan Pete', 'Manual Scan Julia'].some((name) => $(name).isExecuted);
+const manual = ['Manual Scan', 'Manual Scan Pete', 'Manual Scan Julia', 'Manual Scan Fiona'].some((name) => $(name).isExecuted);
 const marked = $('Mail Outcome').isExecuted ? $('Mail Outcome').all().map((i) => i.json) : [];
 if (failures.length === 0 && !manual) return [];
 
@@ -38,7 +38,7 @@ if (filed.length) {
 if (skipped.length) {
   parts.push('SKIPPED (identical file already in the folder)\n' + skipped.map((j) => `- ${j.account}: ${j.fileName}${j.uncompared ? '  (exists; the check timed out so it was not compared)' : ''}`).join('\n'));
 }
-const labelFails = ['Statements', 'Pete', 'Julia']
+const labelFails = ['Statements', 'Pete', 'Julia', 'Fiona']
   .map((who) => [who, $(`Mark ${who}`).isExecuted ? $(`Mark ${who}`).all().filter((i) => i.json.error).length : 0])
   .filter(([, n]) => n > 0);
 if (labelFails.length) {

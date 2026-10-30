@@ -61,7 +61,7 @@ Each account has `statements.match`: one rule `{from, to, subject, filename}` or
 - `from`, `to`: case-insensitive *substring* of the sender / the To header.
 - `label`: a Gmail label on the email, whole name, case-insensitive (e.g. `Rob`). For mail that nothing in the headers
   can tell apart (FNB credit-card statements for two people sent to one address). The scan paths of **Manual Scan** and
-  **Manual Scan Pete/Julia** look the label names up first (the *Labels …* node); the hourly Gmail Trigger does not,
+  **Manual Scan Pete/Julia/Fiona** look the label names up first (the *Labels …* node); the hourly Gmail Trigger does not,
   so a `label` rule never matches there (use a `to` address and a forwarding filter for ongoing mail).
   Typical use: `[ {from, to: "rob@", filename}, {from, label: "Rob", filename} ]`, any rule may match.
 - `by_content: "regex"` (on a rule): a last resort for accounts nothing in the email can tell apart, such as two
@@ -246,7 +246,7 @@ Run Summary email still counts what was intended. Nothing is deleted unless `pur
 2. Adjust the search on the Scan node. Default: PDF attachments, not yet labelled `statements-filed`, from the senders (and Gmail labels `Julia`/`Rob`) used in the `match` rules, max 500 messages (Pete: last 365 days, Julia: last 180). The sender list is a one-off snapshot for catching up on history: new senders go into the account's `match` rule and the Gmail Trigger query, not into these scans.
 3. Open the **Manual Scan Pete** node and execute from it. Results go through the same matching, filing, skipping and summary email as a normal scan; emails are labelled (and trashed where `purge_email` is set) **in that user's mailbox**.
 4. When finished: delete the credential in n8n (if it was only for this) and revoke the app in that Google account (myaccount.google.com → Security → third-party apps). Google refresh tokens do not expire on their own, so revoking is what ends the access.
-`julia` works the same way.
+`julia` works the same way, and so does **Manual Scan Fiona** (credential *Gmail - fiona@vanheerden.ch*; default search: the ENBD statement sender only, last 220 days, to catch up from her last reconciled statement). `fiona@vanheerden.ch` is also a trusted forwarder, like Pete and Julia.
 
 Each failure line in the alert email also names the **original email** (subject, sender, date, mailbox and a Gmail link; the link opens in the right account via `authuser=`).
 
