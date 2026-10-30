@@ -25,7 +25,7 @@
 // Forwards from TRUSTED_FORWARDERS are unwrapped: the original sender, subject and
 // recipient are read from the "Forwarded message" block, so a one-off manual forward
 // is matched exactly as the original email would have been.
-const TRUSTED_FORWARDERS = ['pete@vanheerden.ch', 'julia@vanheerden.ch', 'fiona@vanheerden.ch'];
+const TRUSTED_FORWARDERS = ['pete@vanheerden.ch', 'julia@vanheerden.ch', 'fiona@vanheerden.ch', 'petevanh@proton.me'];
 const MAX_LINKS = 15;
 
 // Account list (match rules, folders, link settings; no secrets) from the sidecar.
