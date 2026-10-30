@@ -3,6 +3,9 @@ services:
     build: .
     container_name: n8n
     restart: unless-stopped
+    # The bank files on the NAS share are 770 pvh:pvh; n8n (uid 1000) reads them through the group
+    group_add:
+      - "3000"
 
     env_file:
       - .env
@@ -20,10 +23,16 @@ services:
       - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
       - N8N_TRUST_PROXY=true
       - N8N_PROXY_HOPS=1
+      # File nodes (YNAB dry run, SMS to YNAB v3) may only touch these paths
+      - N8N_RESTRICT_FILE_ACCESS_TO=/data/private-config.json;/data/banks-combined.json;/data/parsed;/data/dryrun-out
 
     volumes:
       - n8n_data:/home/node/.n8n
       - ${BANK_CONFIG_FILE:-../../bank-automation/private-config.json}:/data/private-config.json:ro
+      - ${BANKS_COMBINED_FILE:-../../bank-automation/releases/banks-combined.json}:/data/banks-combined.json:ro
+      # YNAB dry run: parsed statement CSVs (read-only) and the detail output; keep both outside the repos
+      - ${PARSED_DIR:-/mnt/development/temp/parsed}:/data/parsed:ro
+      - ${DRYRUN_OUT_DIR:-/mnt/development/temp/dryrun-out}:/data/dryrun-out
 
     labels:
       - "traefik.enable=true"
