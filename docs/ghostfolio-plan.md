@@ -33,6 +33,15 @@ It replaces Sharesight for monitoring, and the Yahoo Finance widget lists that n
 
 The honest summary: IBKR can be fully automated; the South African platforms need a monthly manual export or statement parsing, which is acceptable for a long-term portfolio that changes slowly.
 
+## Quantities versus prices (South African portfolios)
+
+Decision (31/10/2026): the parents' portfolios change slowly, so manual statement imports are acceptable. The two things that move are handled separately:
+
+- **Prices** change daily and must be automated (see Pricing). Unit trust prices are the main item.
+- **Quantities** change only on events: contributions, withdrawals, switches, and distributions reinvested as extra units. Allan Gray unit counts therefore drift between statements even when nobody does anything. Each statement import records these events (BUY, SELL, and DIVIDEND where the distribution is shown separately).
+- **Monthly unit check:** compare each fund's units on the statement with Ghostfolio's units. Any difference is a missed event; book it as an adjusting BUY or SELL dated at the statement date, and note it in the comment. This is the check that catches missed distributions, and it costs one comparison per fund per statement.
+- **Price source: verify.** Allan Gray publishes daily unit prices on its website. Whether there is a downloadable or machine-readable price file, or a listing with Yahoo or another feed by ISIN or fund code, is not confirmed. Check this first, because it decides whether the prices workflow is a scrape or a feed.
+
 ## Pricing
 
 - IBKR securities: Yahoo Finance through ISIN-to-symbol mapping (as in Export-To-Ghostfolio). JSE listings are expected to use the `.JO` suffix; **verify** coverage and currency (ZAR versus ZAc) for the specific holdings.
