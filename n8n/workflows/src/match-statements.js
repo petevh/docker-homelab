@@ -99,14 +99,42 @@ function authenticated(headers, domain) {
   return spf || dkim;
 }
 
-function unwrapForward(mail, body, headers) {
+// Forwards from mobile mail apps have no From:/Subject: block, only a quote line such as
+// "On Sunday, 12/01/24 at 16:10 CBD <sender@bank> wrote:". The sender is read from it, and
+// the date, whose order (month/day or day/month) is settled by the weekday it names.
+// A forward prefix on the subject (Fw:, Fwd:, Re:) never belongs to the bank's subject.
+const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const bareSubject = (s) => String(s || '').replace(/^\s*(?:(?:re|fw|fwd)\s*:\s*)+/i, '').trim();
+function unwrapQuoted(mail, body, html) {
+  const src = (html ? stripTags(html) : '') || body;
+  const m = src.match(/On\s+(\w+?)day,?\s+(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+at\s+\d{1,2}:\d{2}[^\n<]{0,12}?\s+([^\n]{1,120}?)\s+wrote\s*:/i);
+  const base = { ...mail, subject: bareSubject(mail.subject) };
+  if (!m) return base;
+  const wd = DAYS.indexOf((m[1] + 'day').slice(0, 3).toLowerCase());
+  const a = Number(m[2]), b = Number(m[3]), y = Number(m[4]) < 100 ? 2000 + Number(m[4]) : Number(m[4]);
+  const fits = (mo, d) => mo >= 1 && mo <= 12 && d >= 1 && d <= daysIn(y, mo) && new Date(Date.UTC(y, mo - 1, d)).getUTCDay() === wd;
+  const iso = (mo, d) => `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // month/day and day/month can both fit the weekday (a weekday repeats every 6 months); the
+  // statement is issued just after the month it covers, so the subject picks the nearer one
+  const found = [...new Set([fits(a, b) ? iso(a, b) : '', fits(b, a) ? iso(b, a) : ''].filter(Boolean))];
+  let date = found.length === 1 ? found[0] : '';
+  const covered = /for the month of\s+([A-Za-z]{3,9})\s+(\d{4})/i.exec(mail.subject || '');
+  const cm = covered && MONTHS[covered[1].slice(0, 3).toLowerCase()];
+  if (found.length > 1 && cm) {
+    const issued = Date.UTC(Number(covered[2]), cm, 1); // the 1st of the month after the covered one
+    date = found.sort((p, q) => Math.abs(Date.parse(p) - issued) - Math.abs(Date.parse(q) - issued))[0];
+  }
+  return { ...base, from: m[5].trim() || mail.from, date };
+}
+
+function unwrapForward(mail, body, headers, html) {
   const forwarder = TRUSTED_FORWARDERS.find((f) => mail.from.toLowerCase().includes(f.toLowerCase()));
   if (!forwarder || !authenticated(headers, forwarder.split('@')[1])) return mail;
   const marker = body.match(/(?:Forwarded message|Original Message)\s*-{3,}/i);
   const from0 = marker ? marker.index : 0;
   const win = body.slice(from0, from0 + 3000);
   const start = win.search(/\*?From\s*:\*?/i);
-  if (start < 0 || start > (marker ? 200 : 600)) return mail;
+  if (start < 0 || start > (marker ? 200 : 600)) return unwrapQuoted(mail, body, html);
 
   const labels = [...win.slice(start).matchAll(/\*?\b(From|Sent|Date|To|Cc|Bcc|Subject)\s*:\*?/gi)];
   const got = {};
@@ -116,7 +144,16 @@ function unwrapForward(mail, body, headers) {
     const valueStart = labels[i].index + labels[i][0].length;
     const rest = win.slice(start);
     let value;
-    if (key === 'subject' || i === labels.length - 1) {
+    if (key === 'subject') {
+      // a long subject wraps onto the next line(s): "...Account Number" / "XXXX 0161"
+      const lines = rest.slice(valueStart).split('\n');
+      const parts = [lines[0]];
+      for (const l of lines.slice(1, 4)) {
+        if (!l.trim() || /^\s*\*?(From|Sent|Date|To|Cc|Bcc)\s*:/i.test(l)) break;
+        parts.push(l);
+      }
+      value = parts.join(' ');
+    } else if (i === labels.length - 1) {
       value = rest.slice(valueStart).split('\n')[0];
     } else {
       value = rest.slice(valueStart, labels[i + 1].index);
@@ -129,7 +166,7 @@ function unwrapForward(mail, body, headers) {
     // keep BOTH recipients: the forward's own To (e.g. statements+rob@) selects the
     // account for plus-addressed rules, the original To is what the sender used.
     to: `${mail.to} ${got.to || ''}`.trim(),
-    subject: got.subject || mail.subject,
+    subject: bareSubject(got.subject || mail.subject),
     // when the ORIGINAL email was sent (Gmail "Date:", Outlook "Sent:"), not when it was forwarded
     date: dateFromText(got.date || got.sent || ''),
   };
@@ -270,6 +307,7 @@ for (const [index, item] of emails.entries()) await (async () => {
     { from: hdr(j.from, j.From), to: hdr(j.to, j.To), subject: j.subject || j.Subject || '' },
     body,
     j.headers,
+    j.html || j.textAsHtml,
   );
   mail0.labels = Array.isArray(j.labels) ? j.labels : [];
   const parsed = new Date(j.date || j.Date || Number(j.internalDate) || Date.now());
