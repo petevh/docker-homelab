@@ -1,5 +1,16 @@
 # Development Notes
 
+## 2026-10-31 — Ghostfolio planned
+
+Plan and spec: `docs/ghostfolio-plan.md` (IBKR sync via Flex Web Service and the Ghostfolio import API, manual or statement-based intake for Allan Gray, EasyEquities, Sygnia and Computershare, unit trust prices as a manual source, parallel run against Sharesight).
+
+### Next steps
+- [ ] Create `ghostfolio/` compose (ghostfolio, postgres, redis) behind Traefik, secrets and backup as for the other services
+- [ ] IBKR Flex Queries and token; n8n daily sync
+- [ ] Check JSE tickers and unit trust pricing; ask Sharesight for API access or export
+- [ ] Check export options at Allan Gray, Sygnia, EasyEquities, Computershare
+- [ ] Parallel run, then decide on the Sharesight switch
+
 ## 2026-06-09 — Dahua intercom service added
 
 New service `intercom/` wraps the Dahua VTH2622GW-W intercom via a FastAPI HTTP API, exposing door unlock, camera stream, and doorbell events for integration with Home Assistant, n8n, iOS Shortcuts, and Tasker.
