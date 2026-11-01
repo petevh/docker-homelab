@@ -24,7 +24,7 @@ It replaces Sharesight for monitoring, and the Yahoo Finance widget lists that n
 
 | Source | What exists | Plan | Confidence |
 |---|---|---|---|
-| IBKR | Flex Web Service: a token plus saved query ids return Trades and Cash Transactions reports by HTTP. The community tool Export-To-Ghostfolio converts IBKR Flex CSV (Trades: buy/sell, date, ISIN, quantity, price, commission; Cash Transactions: dividends) into Ghostfolio import JSON and can call the import API. | n8n schedule: fetch both Flex reports with the token, convert (reuse or port Export-To-Ghostfolio's mapping, ISIN to Yahoo symbol), POST to the import API. The token is read-only. | High, **verify** corporate actions, FX trades, fees and non-Yahoo listings on real data. |
+| IBKR | Flex Web Service: a token plus saved query ids return Trades and Cash Transactions reports by HTTP. The community tool Export-To-Ghostfolio converts IBKR Flex CSV (Trades: buy/sell, date, ISIN, quantity, price, commission; Cash Transactions: dividends) into Ghostfolio import JSON and can call the import API. | n8n schedule: fetch both Flex reports with the token, convert (reuse or port Export-To-Ghostfolio's mapping, ISIN to Yahoo symbol), POST to the import API. The token is read-only. | High, **verify** corporate actions, FX trades, fees and non-Yahoo listings on real data. Candidate to reuse instead of building the Ghostfolio side: `flowcool/ghostfolio-ibkr-sync` (fork of `obol89/ghostfolio-ibkr-sync`; Python, Docker, Flex based, dry run by default, duplicate and holdings checks, corporate-action hold). Excludes options and FX trades, and keeps base-currency cash only. See Reuse first. |
 | Computershare | No API or CSV found; Investor Centre appears to offer PDF exports for transaction and dividend history. Plan shares may sit on a separate portal. | Start with a one-off manual import of history; then monthly: statement PDFs through the existing bank-statements workflow, parsed in this repository's parser style. Alternatively read Sharesight's API for the existing history (Sharesight offers API access on request for Investor plans and above; trade listing via the older v2 routes per a community client, **verify**). | Low to medium |
 | EasyEquities | Statements and full transaction history can be downloaded from the platform; CSV not confirmed. Unofficial Python clients (`easy-equities-client`, `pyeasyequities`) log in with username and password and read holdings and transactions; one is unmaintained. | Prefer a manual monthly export. Avoid storing the parents' password in n8n for an unofficial client unless there is no other way. | Low to medium |
 | Allan Gray | Public daily unit trust prices page; no transaction export or API found. | Prices: scrape or manual source. Transactions: statements (PDF) or manual entry; check the client portal for exports. | Low |
@@ -41,6 +41,15 @@ Decision (31/10/2026): the parents' portfolios change slowly, so manual statemen
 - **Quantities** change only on events: contributions, withdrawals, switches, and distributions reinvested as extra units. Allan Gray unit counts therefore drift between statements even when nobody does anything. Each statement import records these events (BUY, SELL, and DIVIDEND where the distribution is shown separately).
 - **Monthly unit check:** compare each fund's units on the statement with Ghostfolio's units. Any difference is a missed event; book it as an adjusting BUY or SELL dated at the statement date, and note it in the comment. This is the check that catches missed distributions, and it costs one comparison per fund per statement.
 - **Price source: verify.** Allan Gray publishes daily unit prices on its website. Whether there is a downloadable or machine-readable price file, or a listing with Yahoo or another feed by ISIN or fund code, is not confirmed. Check this first, because it decides whether the prices workflow is a scrape or a feed.
+
+## Reuse first (IBKR sync)
+
+Decision (01/11/2026): reuse existing tools where they fit, and build our own where they do not.
+
+- **Trial `flowcool/ghostfolio-ibkr-sync`** for the Ghostfolio side: configuration only (`mapping.yaml`, `.env`), image pinned by digest, `DRY_RUN` first against a real Flex export. Check before relying on it: upstream and fork activity and open issues, our JSE and unit-trust holdings in the symbol mapping, the Ghostfolio version it needs (2.248.0 or later), and the 365-day Flex limit (older history is a one-off import).
+- **Licence:** "MIT NON-AI License". As read, it bars using the software or its derivatives to train or improve ML models and does not restrict running it. Keep it unmodified; read the LICENSE yourself.
+- **Not covered, so built separately:** forex trades and non-base-currency cash. They are needed for wealth-ledger's hub accounts (`wealth-ledger/docs/design.md` section 8.6), through its own Flex query with the same token. The sync's query must include the Corporate Actions section, even when empty.
+- n8n keeps the schedule, the summary mail and the monthly reconciliation check; it no longer needs to convert or post activities itself if the trial passes.
 
 ## Pricing
 
@@ -97,6 +106,7 @@ Run Ghostfolio beside Sharesight for at least a quarter. Switch the monitoring o
 - [ ] Read the Ghostfolio compose file and docs for the current version; decide the image tag.
 - [ ] Create `ghostfolio/` in docker-homelab (compose, secrets pattern, Traefik labels, backup job).
 - [ ] Create users (Pete, parents) and one account per platform.
+- [ ] Trial `flowcool/ghostfolio-ibkr-sync` (dry run, pinned digest) on a real export; if it fits, drop the custom conversion in workflow 1 and keep the n8n schedule and summary.
 - [ ] IBKR: create the two Flex Queries and the token; test the conversion on a real export; check the Yahoo mapping for each holding.
 - [ ] Test JSE tickers (`.JO`) and unit trust pricing on a few holdings.
 - [ ] Ask Sharesight for API access (or export the history) to carry over Computershare and pension history.
