@@ -1634,7 +1634,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Hand the decrypted PDF (still attached to the item the upload used) to the reconcile flow, for statements filed just now.\n// Only metadata and the PDF travel; the flow parses it in memory, matches it with YNAB and keeps nothing.\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const j = items[i].json;\n  if (!j.filed || !(j.isNew || j.ledgerError)) continue;\n  const src = $('Decide').itemMatching(i);\n  if (!src.binary || !src.binary.data) continue;\n  out.push({ json: { account: j.account, fileName: j.fileName, folder: j.folder, isNew: j.isNew }, binary: { data: src.binary.data }, pairedItem: { item: i } });\n}\nreturn out;\n"
+          "jsCode": "// Hand the decrypted PDF (still attached to the item the upload used) to the reconcile flow, for statements filed just now.\n// Only metadata and the PDF travel; the flow parses it in memory, matches it with YNAB and keeps nothing.\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const j = items[i].json;\n  if (!j.filed || !(j.isNew || j.ledgerError)) continue;\n  const src = $('Decide').itemMatching(i);\n  if (!src.binary || !src.binary.data) continue;\n  out.push({ json: { account: j.account, fileName: j.fileName, folder: j.folder, isNew: j.isNew }, binary: { data: src.binary.data }, pairedItem: { item: i } });\n}\n// oldest statement first, so several statements filed in one poll reach the reconcile flow in order\nout.sort((a, b) => String(a.json.fileName).localeCompare(String(b.json.fileName)));\nreturn out;\n"
         },
         "name": "Reattach PDF",
         "type": "n8n-nodes-base.code",

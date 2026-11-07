@@ -21,7 +21,7 @@ account key, so passwords never show up in n8n execution data.
                                matcher to tell accounts apart when nothing else can: the key
                                whose `by_content` regex is found in the PDF's text. The body may be
                                base64 text (Content-Type: text/plain) instead of raw bytes.
-  POST /parse-clear?account=KEY  removes the scratch files of /parse (end of a run)
+  POST /parse-clear?account=KEY  removes the scratch files of /parse and frees the account's run lock (end of a run)
   POST /parse?account=KEY&file=NAME.pdf
                                body = PDF (decrypted or not) -> runs scripts/parse-statement.py
                                with the account's settings from parse-map.json. Only a statement
@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -67,6 +68,31 @@ PARSE_MAP_PATH = os.environ.get("PARSE_MAP_PATH", "/app/parse-map.json")
 REPO_DIR = os.environ.get("REPO_DIR", "/repo")
 PARSED_DIR = os.environ.get("PARSED_DIR", "/parsed")
 PARSE_LOCK = threading.Lock()
+# One statement run per account at a time (parse -> dry run -> apply -> cleanup share a scratch folder and a plan file). /parse takes the account's run
+# lock (waiting for the run before it) and /parse-clear, the last step of every run, gives it back. A run that never reaches its cleanup frees it by itself
+# after RUN_TTL seconds.
+RUN_LOCKS = {}
+RUN_GUARD = threading.Lock()
+RUN_TTL = 600
+RUN_WAIT = 840
+
+
+def acquire_run(account):
+    deadline = time.time() + RUN_WAIT
+    while True:
+        with RUN_GUARD:
+            until = RUN_LOCKS.get(account, 0)
+            if until <= time.time():
+                RUN_LOCKS[account] = time.time() + RUN_TTL
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def release_run(account):
+    with RUN_GUARD:
+        RUN_LOCKS.pop(account, None)
 PARSE_NAME = re.compile(r"^[A-Za-z0-9 ._()+-]{1,200}\.pdf$")
 MAX_JSON_BODY = 16 * 1024
 MAX_FILED_BODY = 256 * 1024
@@ -295,6 +321,8 @@ def parse_statement(pdf, account, original):
     # a file already named by the folder convention (2026.09_<account>_...) keeps its own statement month and name
     named = re.match(rf"^(\d{{4}}\.\d{{2}})_{re.escape(account)}_(.+)\.pdf$", original)
     name = f"{account}_{named.group(2) if named else original[:-4]}"
+    if not acquire_run(account):
+        raise DecryptError(409, f"another statement run for '{account}' is still busy")
     with PARSE_LOCK, tempfile.TemporaryDirectory() as tmp:
         src_dir, out_dir = os.path.join(tmp, "in"), os.path.join(tmp, "out")
         os.makedirs(src_dir)
@@ -488,7 +516,10 @@ class Handler(BaseHTTPRequestHandler):
             self.identify_owner(parse_qs(url.query).get("accounts", [""])[0])
             return
         if url.path == "/parse-clear":
-            self.send_json(200, {"removed": clear_incoming(parse_qs(url.query).get("account", [""])[0])})
+            acct = parse_qs(url.query).get("account", [""])[0]
+            removed = clear_incoming(acct)
+            release_run(acct)
+            self.send_json(200, {"removed": removed})
             return
         if url.path == "/parse":
             q = parse_qs(url.query)
