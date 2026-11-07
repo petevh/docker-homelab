@@ -28,5 +28,15 @@
     "bank": "core/patterns/banks/za/fnb.json",
     "layout": "pdf_card",
     "out": "parsed-fnb"
+  },
+  "cbd_current_account": {
+    "bank": "core/patterns/banks/ae/cbd.json",
+    "layout": "current_account",
+    "out": "parsed-cbd"
+  },
+  "cbd_home_loan": {
+    "bank": "core/patterns/banks/ae/cbd.json",
+    "layout": "home_loan",
+    "out": "parsed-cbd"
   }
 }
