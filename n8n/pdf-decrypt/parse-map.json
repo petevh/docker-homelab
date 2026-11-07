@@ -38,5 +38,10 @@
     "bank": "core/patterns/banks/ae/cbd.json",
     "layout": "home_loan",
     "out": "parsed-cbd"
+  },
+  "ubs_payslip": {
+    "bank": "core/patterns/banks/ae/ubs.json",
+    "layout": "payslip",
+    "out": "parsed-ubs"
   }
 }
