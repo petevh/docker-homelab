@@ -21,13 +21,23 @@ account key, so passwords never show up in n8n execution data.
                                matcher to tell accounts apart when nothing else can: the key
                                whose `by_content` regex is found in the PDF's text. The body may be
                                base64 text (Content-Type: text/plain) instead of raw bytes.
+  POST /parse-clear?account=KEY  removes the scratch files of /parse (end of a run)
+  POST /parse?account=KEY&file=NAME.pdf
+                               body = PDF (decrypted or not) -> runs scripts/parse-statement.py
+                               with the account's settings from parse-map.json. Only a statement
+                               whose balance check says OK is written to a scratch folder
+                               (_incoming/<account>) for this run only; anything else is reported
+                               and not stored. Response: {ok, status, line, csv, rows, opening,
+                               closing, first_date, last_date, check}. Counts and balances only.
 """
 
 import base64
+import csv
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -51,6 +61,13 @@ MAX_BODY = 50 * 1024 * 1024
 LISTEN_BACKLOG = int(os.environ.get("LISTEN_BACKLOG", "256"))
 # qpdf runs per request thread; cap them so a burst queues instead of exhausting CPU/memory.
 QPDF_SLOTS = threading.BoundedSemaphore(int(os.environ.get("QPDF_CONCURRENCY", "4")))
+# Statement parser: the repo's scripts and bank patterns (read-only mount), the parse settings per
+# account, and the folder the dry-run workflow reads (the only place the parser's output is stored).
+PARSE_MAP_PATH = os.environ.get("PARSE_MAP_PATH", "/app/parse-map.json")
+REPO_DIR = os.environ.get("REPO_DIR", "/repo")
+PARSED_DIR = os.environ.get("PARSED_DIR", "/parsed")
+PARSE_LOCK = threading.Lock()
+PARSE_NAME = re.compile(r"^[A-Za-z0-9 ._()+-]{1,200}\.pdf$")
 MAX_JSON_BODY = 16 * 1024
 MAX_FILED_BODY = 256 * 1024
 MAX_FILED_ENTRIES = 500
@@ -246,6 +263,87 @@ def decrypt(pdf, passwords):
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
+def clear_incoming(account):
+    """Remove the scratch files of one account (only inside PARSED_DIR/_incoming/<account>)."""
+    if not re.match(r"^[a-z0-9_]{1,80}$", account or ""):
+        return 0
+    folder = os.path.join(PARSED_DIR, "_incoming", account)
+    removed = 0
+    if os.path.isdir(folder):
+        for f in os.listdir(folder):
+            path = os.path.join(folder, f)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+    return removed
+
+
+def parse_statement(pdf, account, original):
+    """Run the repo's statement parser on one PDF. Returns the response dict (see the module doc).
+    Only an OK statement is copied into PARSED_DIR; the parser's own balance check decides."""
+    try:
+        with open(PARSE_MAP_PATH, encoding="utf-8") as f:
+            spec = json.load(f).get(account)
+    except (OSError, ValueError):
+        spec = None
+    if not spec:
+        raise DecryptError(404, f"no parse settings for '{account}' in parse-map.json")
+    if b"%PDF-" not in pdf[:1024]:
+        raise DecryptError(400, "not a PDF")
+    if not PARSE_NAME.match(original or ""):
+        raise DecryptError(400, "file name must be a plain name ending in .pdf")
+    # a file already named by the folder convention (2026.09_<account>_...) keeps its own statement month and name
+    named = re.match(rf"^(\d{{4}}\.\d{{2}})_{re.escape(account)}_(.+)\.pdf$", original)
+    name = f"{account}_{named.group(2) if named else original[:-4]}"
+    with PARSE_LOCK, tempfile.TemporaryDirectory() as tmp:
+        src_dir, out_dir = os.path.join(tmp, "in"), os.path.join(tmp, "out")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, name + ".pdf"), "wb") as f:
+            f.write(pdf)
+        cmd = [sys.executable, os.path.join(REPO_DIR, "scripts", "parse-statement.py"), src_dir,
+               "--bank", os.path.join(REPO_DIR, spec["bank"]), "--key", account,
+               "--config", CONFIG_PATH, "--passwords", PASSWORDS_PATH, "--out", out_dir]
+        if spec.get("layout"):
+            cmd += ["--layout", spec["layout"]]
+        run = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        line = next((l for l in run.stdout.splitlines() if re.match(r"^[A-Z][A-Z-]+: ", l)), "")
+        status = line.split(":", 1)[0] if line else "FAILED"
+        result = {"ok": False, "status": status, "line": line, "account": account, "csv": "", "rows": 0, "check": ""}
+        src_csv, src_check = os.path.join(out_dir, name + ".csv"), os.path.join(out_dir, name + ".check.txt")
+        if os.path.exists(src_check):
+            with open(src_check, encoding="utf-8") as f:
+                result["check"] = f.read()[-1500:]
+        if status != "OK" or not os.path.exists(src_csv):
+            return result
+        with open(src_csv, newline="", encoding="utf-8") as f:
+            rows = [r for r in csv.DictReader(f) if (r.get("date") or "").strip()]
+        result["rows"] = len(rows)
+        if not rows:
+            result["status"] = "NO-TRANSACTIONS"
+            return result
+        # Nothing is kept: the parsed statement goes to a per-account scratch folder that the dry run reads for this run only,
+        # and /parse-clear removes it when the run ends. A new /parse for the account replaces whatever a failed run left behind.
+        dest = os.path.join(PARSED_DIR, "_incoming", account)
+        os.makedirs(dest, exist_ok=True)
+        clear_incoming(account)
+        final = name
+        for src, ext in ((src_csv, ".csv"), (src_check, ".check.txt")):
+            if os.path.exists(src):
+                tmp_dst = os.path.join(dest, f".{final}{ext}.tmp")
+                with open(src, "rb") as a, open(tmp_dst, "wb") as b:
+                    b.write(a.read())
+                os.replace(tmp_dst, os.path.join(dest, final + ext))
+        try:   # YNAB terms: computed_balance is the balance after each row, so the opening is the first balance less the first amount
+            result["closing"] = float(rows[-1]["computed_balance"])
+            result["opening"] = round(float(rows[0]["computed_balance"]) - float(rows[0]["amount"]), 2)
+            result["first_date"], result["last_date"] = rows[0]["date"], rows[-1]["date"]
+        except (KeyError, ValueError):
+            pass
+        result.update(ok=True, csv=final + ".csv")
+        return result
+
+
 def pdf_text(pdf):
     """Text shown in a (decrypted) PDF, one string per text-showing operator; '' if none found.
 
@@ -388,6 +486,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/identify":
             self.identify_owner(parse_qs(url.query).get("accounts", [""])[0])
+            return
+        if url.path == "/parse-clear":
+            self.send_json(200, {"removed": clear_incoming(parse_qs(url.query).get("account", [""])[0])})
+            return
+        if url.path == "/parse":
+            q = parse_qs(url.query)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_BODY:
+                self.send_json(413 if length > MAX_BODY else 400, {"error": "bad body size"})
+                return
+            pdf = self.rfile.read(length)
+            try:
+                self.send_json(200, parse_statement(pdf, q.get("account", [""])[0], q.get("file", [""])[0]))
+            except DecryptError as e:
+                self.send_json(e.status, {"error": e.message})
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+                self.send_json(500, {"error": f"{type(e).__name__}"})
             return
         if url.path != "/decrypt":
             self.send_json(404, {"error": "not found"})

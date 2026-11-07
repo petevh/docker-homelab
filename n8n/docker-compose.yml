@@ -67,6 +67,10 @@ services:
       # The only writable mount: statement-folder-ids.json (OneDrive folder ids the workflow
       # resolved). A directory, so the file can be replaced atomically. Created on first use.
       - ${BANK_STATE_DIR:-../../bank-automation/state}:/state
+      # Statement parser: the repo's scripts and bank patterns (read-only) and the folder the dry run
+      # reads. Parsed CSVs are written there, only for statements whose balance check says OK.
+      - ../../bank-automation:/repo:ro
+      - ${PARSED_DIR:-/mnt/development/temp/parsed}:/parsed
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s

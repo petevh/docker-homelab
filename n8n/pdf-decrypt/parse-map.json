@@ -1,0 +1,7 @@
+{
+  "fnb_current_rob": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_account",
+    "out": "parsed-fnb"
+  }
+}
