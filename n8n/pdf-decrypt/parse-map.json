@@ -3,5 +3,30 @@
     "bank": "core/patterns/banks/za/fnb.json",
     "layout": "pdf_account",
     "out": "parsed-fnb"
+  },
+  "fnb_current_julia": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_account",
+    "out": "parsed-fnb"
+  },
+  "fnb_savings_rob": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_account",
+    "out": "parsed-fnb"
+  },
+  "fnb_savings_julia": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_account",
+    "out": "parsed-fnb"
+  },
+  "fnb_credit_card_rob": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_card",
+    "out": "parsed-fnb"
+  },
+  "fnb_credit_card_julia": {
+    "bank": "core/patterns/banks/za/fnb.json",
+    "layout": "pdf_card",
+    "out": "parsed-fnb"
   }
 }
