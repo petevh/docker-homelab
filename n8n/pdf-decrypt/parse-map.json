@@ -44,6 +44,38 @@
     "layout": "payslip",
     "out": "parsed-ubs"
   },
+  "enbd_current_account": {
+    "bank": "core/patterns/banks/ae/emirates-nbd.json",
+    "layout": "current_account"
+  },
+  "enbd_fi_salary": {
+    "bank": "core/patterns/banks/ae/emirates-nbd.json",
+    "layout": "current_account"
+  },
+  "enbd_visa_infinite": {
+    "bank": "core/patterns/banks/ae/emirates-nbd.json",
+    "layout": "credit_card"
+  },
+  "adcb_365_credit_card": {
+    "bank": "core/patterns/banks/ae/adcb.json"
+  },
+  "eib_cashback_plus": {
+    "bank": "core/patterns/banks/ae/emirates-islamic.json",
+    "layout": "credit_card"
+  },
+  "eib_amazon": {
+    "bank": "core/patterns/banks/ae/emirates-islamic.json",
+    "layout": "credit_card"
+  },
+  "eib_rta_card": {
+    "bank": "core/patterns/banks/ae/emirates-islamic.json",
+    "layout": "credit_card"
+  },
+  "wio_credit_card": {
+    "bank": "core/patterns/banks/ae/wio.json",
+    "layout": "credit_card",
+    "out": "parsed-wio"
+  },
   "wio_ae": {
     "bank": "core/patterns/banks/ae/wio.json",
     "layout": "account_csv",
