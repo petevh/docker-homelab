@@ -26,6 +26,9 @@ account key, so passwords never show up in n8n execution data.
   run ID and empties _batch/<account>; POST /parse?account=KEY&file=NAME.pdf&run=ID&batch=1 then parses each file into _batch/<account> (kept
   under the file's own name, nothing replaced) while the same run holds the lock; POST /parse-clear?account=KEY&batch=1&run=ID[&keep=1] frees
   the lock and, unless keep=1, empties _batch/<account>.
+  A multi-account CSV (Wio): POST /parse-group?group=KEY&file=NAME.csv&run=ID[&skip=A,B] with the CSV as body (same run id / lock as the batch,
+  started with /parse-batch-start?account=KEY) splits it by account as parse-statement.py --group does and keeps every OK result in _batch/<KEY>
+  as <file>__<account key>.csv. Response: {ok, results: [{key, status, rows}], unmapped: [{label, rows}]}.
   POST /parse?account=KEY&file=NAME.pdf
                                body = PDF (decrypted or not) -> runs scripts/parse-statement.py
                                with the account's settings from parse-map.json. Only a statement
@@ -312,6 +315,73 @@ def clear_incoming(account, area="_incoming"):
     return removed
 
 
+PARSE_CSV_NAME = re.compile(r"^[A-Za-z0-9 ._()+-]{1,200}\.csv$")
+GROUP_LINE = re.compile(r"^([A-Z][A-Z-]+): (.+?) \[([a-z0-9_]+)\]\s+(\d+) tx")
+UNMAPPED_LINE = re.compile(r"^\s{2}(.+): (\d+)$")
+
+
+def parse_group(data, group, original, run, skip=""):
+    """Run parse-statement.py --group on one multi-account CSV; keep each account's OK result in _batch/<group>. Counts and statuses only come back."""
+    try:
+        with open(PARSE_MAP_PATH, encoding="utf-8") as f:
+            spec = json.load(f).get(group)
+    except (OSError, ValueError):
+        spec = None
+    if not spec or not spec.get("group"):
+        raise DecryptError(404, f"no CSV group settings for '{group}' in parse-map.json")
+    if not PARSE_CSV_NAME.match(original or ""):
+        raise DecryptError(400, "file name must be a plain name ending in .csv")
+    if data[:5] == b"%PDF-" or b"\x00" in data[:2048]:
+        raise DecryptError(400, "not a CSV")
+    if not RUN_ID.match(run or ""):
+        raise DecryptError(400, "a group parse needs a run id")
+    if not re.match(r"^[a-z0-9_,]{0,400}$", skip or ""):
+        raise DecryptError(400, "bad skip list")
+    if not acquire_run(group, run):
+        raise DecryptError(409, f"another statement run for '{group}' is still busy")
+    with PARSE_LOCK, tempfile.TemporaryDirectory() as tmp:
+        src_dir, out_dir = os.path.join(tmp, "in"), os.path.join(tmp, "out")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, original), "wb") as f:
+            f.write(data)
+        cmd = [sys.executable, os.path.join(REPO_DIR, "scripts", "parse-statement.py"), src_dir,
+               "--bank", os.path.join(REPO_DIR, spec["bank"]), "--group", spec["group"], "--layout", spec.get("layout", "account_csv"),
+               "--config", CONFIG_PATH, "--passwords", PASSWORDS_PATH, "--out", out_dir]
+        if skip:
+            cmd += ["--skip", skip]
+        run_ = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        results, unmapped, in_unmapped = [], [], False
+        base = os.path.splitext(original)[0]
+        dest = os.path.join(PARSED_DIR, "_batch", group)
+        os.makedirs(dest, exist_ok=True)
+        for line in run_.stdout.splitlines():
+            m = GROUP_LINE.match(line)
+            if m:
+                status, key, rows = m.group(1), m.group(3), int(m.group(4))
+                results.append({"key": key, "status": status, "rows": rows})
+                if status == "OK":
+                    for ext in (".csv", ".check.txt"):
+                        src = os.path.join(out_dir, f"{base}__{key}{ext}")
+                        if os.path.exists(src):
+                            tmp_dst = os.path.join(dest, f".{base}__{key}{ext}.tmp")
+                            with open(src, "rb") as a, open(tmp_dst, "wb") as b:
+                                b.write(a.read())
+                            os.replace(tmp_dst, os.path.join(dest, f"{base}__{key}{ext}"))
+                in_unmapped = False
+                continue
+            if line.startswith("accounts in the file with no csv_match"):
+                in_unmapped = True
+                continue
+            if in_unmapped:
+                u = UNMAPPED_LINE.match(line)
+                if u:
+                    unmapped.append({"label": u.group(1), "rows": int(u.group(2))})
+                    continue
+                in_unmapped = False
+        failed = next((l for l in run_.stdout.splitlines() if l.startswith(("FAILED:", "error:"))), "")
+        return {"ok": bool(results) and not failed, "results": results, "unmapped": unmapped, "line": failed[:200], "group": group}
+
+
 def parse_statement(pdf, account, original, run="", batch=False):
     """Run the repo's statement parser on one PDF. Returns the response dict (see the module doc).
     Only an OK statement is copied into PARSED_DIR; the parser's own balance check decides."""
@@ -556,6 +626,20 @@ class Handler(BaseHTTPRequestHandler):
             removed = clear_incoming(acct)
             release_run(acct)
             self.send_json(200, {"removed": removed})
+            return
+        if url.path == "/parse-group":
+            q = parse_qs(url.query)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_BODY:
+                self.send_json(413 if length > MAX_BODY else 400, {"error": "bad body size"})
+                return
+            data = self.rfile.read(length)
+            try:
+                self.send_json(200, parse_group(data, q.get("group", [""])[0], q.get("file", [""])[0], q.get("run", [""])[0], q.get("skip", [""])[0]))
+            except DecryptError as e:
+                self.send_json(e.status, {"error": e.message})
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+                self.send_json(500, {"error": f"{type(e).__name__}"})
             return
         if url.path == "/parse":
             q = parse_qs(url.query)

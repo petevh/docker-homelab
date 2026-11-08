@@ -43,5 +43,10 @@
     "bank": "core/patterns/banks/ae/ubs.json",
     "layout": "payslip",
     "out": "parsed-ubs"
+  },
+  "wio_ae": {
+    "bank": "core/patterns/banks/ae/wio.json",
+    "layout": "account_csv",
+    "group": "wio_ae"
   }
 }
