@@ -22,6 +22,10 @@ account key, so passwords never show up in n8n execution data.
                                whose `by_content` regex is found in the PDF's text. The body may be
                                base64 text (Content-Type: text/plain) instead of raw bytes.
   POST /parse-clear?account=KEY  removes the scratch files of /parse and frees the account's run lock (end of a run)
+  Batch (a whole folder of statements, for the folder dry run): POST /parse-batch-start?account=KEY&run=ID takes the account's run lock for
+  run ID and empties _batch/<account>; POST /parse?account=KEY&file=NAME.pdf&run=ID&batch=1 then parses each file into _batch/<account> (kept
+  under the file's own name, nothing replaced) while the same run holds the lock; POST /parse-clear?account=KEY&batch=1&run=ID[&keep=1] frees
+  the lock and, unless keep=1, empties _batch/<account>.
   POST /parse?account=KEY&file=NAME.pdf
                                body = PDF (decrypted or not) -> runs scripts/parse-statement.py
                                with the account's settings from parse-map.json. Only a statement
@@ -77,13 +81,17 @@ RUN_TTL = 600
 RUN_WAIT = 840
 
 
-def acquire_run(account):
+RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def acquire_run(account, run=""):
+    """Take the account's run lock. A batch run (run = its id) already holding it just renews it for each file."""
     deadline = time.time() + RUN_WAIT
     while True:
         with RUN_GUARD:
-            until = RUN_LOCKS.get(account, 0)
-            if until <= time.time():
-                RUN_LOCKS[account] = time.time() + RUN_TTL
+            until, holder = RUN_LOCKS.get(account, (0, ""))
+            if until <= time.time() or (run and holder == run):
+                RUN_LOCKS[account] = (time.time() + RUN_TTL, run)
                 return True
         if time.time() >= deadline:
             return False
@@ -289,11 +297,11 @@ def decrypt(pdf, passwords):
         raise DecryptError(422, f"invalid password for this account (tried {len(candidates)})")
 
 
-def clear_incoming(account):
-    """Remove the scratch files of one account (only inside PARSED_DIR/_incoming/<account>)."""
-    if not re.match(r"^[a-z0-9_]{1,80}$", account or ""):
+def clear_incoming(account, area="_incoming"):
+    """Remove the scratch files of one account (only inside PARSED_DIR/<_incoming or _batch>/<account>)."""
+    if not re.match(r"^[a-z0-9_]{1,80}$", account or "") or area not in ("_incoming", "_batch"):
         return 0
-    folder = os.path.join(PARSED_DIR, "_incoming", account)
+    folder = os.path.join(PARSED_DIR, area, account)
     removed = 0
     if os.path.isdir(folder):
         for f in os.listdir(folder):
@@ -304,7 +312,7 @@ def clear_incoming(account):
     return removed
 
 
-def parse_statement(pdf, account, original):
+def parse_statement(pdf, account, original, run="", batch=False):
     """Run the repo's statement parser on one PDF. Returns the response dict (see the module doc).
     Only an OK statement is copied into PARSED_DIR; the parser's own balance check decides."""
     try:
@@ -320,8 +328,11 @@ def parse_statement(pdf, account, original):
         raise DecryptError(400, "file name must be a plain name ending in .pdf")
     # a file already named by the folder convention (2026.09_<account>_...) keeps its own statement month and name
     named = re.match(rf"^(\d{{4}}\.\d{{2}})_{re.escape(account)}_(.+)\.pdf$", original)
-    name = f"{account}_{named.group(2) if named else original[:-4]}"
-    if not acquire_run(account):
+    # a batch keeps every file's own name (the month is what tells 2026.04 from 2026.05); a single statement run drops the month prefix
+    name = original[:-4] if (batch and named) else f"{account}_{named.group(2) if named else original[:-4]}"
+    if batch and not RUN_ID.match(run or ""):
+        raise DecryptError(400, "a batch parse needs a run id")
+    if not acquire_run(account, run if batch else ""):
         raise DecryptError(409, f"another statement run for '{account}' is still busy")
     with PARSE_LOCK, tempfile.TemporaryDirectory() as tmp:
         src_dir, out_dir = os.path.join(tmp, "in"), os.path.join(tmp, "out")
@@ -352,9 +363,10 @@ def parse_statement(pdf, account, original):
             return result
         # Nothing is kept: the parsed statement goes to a per-account scratch folder that the dry run reads for this run only,
         # and /parse-clear removes it when the run ends. A new /parse for the account replaces whatever a failed run left behind.
-        dest = os.path.join(PARSED_DIR, "_incoming", account)
+        dest = os.path.join(PARSED_DIR, "_batch" if batch else "_incoming", account)
         os.makedirs(dest, exist_ok=True)
-        clear_incoming(account)
+        if not batch:
+            clear_incoming(account)
         final = name
         for src, ext in ((src_csv, ".csv"), (src_check, ".check.txt")):
             if os.path.exists(src):
@@ -515,8 +527,32 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/identify":
             self.identify_owner(parse_qs(url.query).get("accounts", [""])[0])
             return
+        if url.path == "/parse-batch-start":
+            q = parse_qs(url.query)
+            acct, run = q.get("account", [""])[0], q.get("run", [""])[0]
+            if not re.match(r"^[a-z0-9_]{1,80}$", acct) or not RUN_ID.match(run):
+                self.send_json(400, {"error": "account and run id needed"})
+                return
+            if not acquire_run(acct, run):
+                self.send_json(409, {"error": f"another statement run for '{acct}' is still busy"})
+                return
+            self.send_json(200, {"ok": True, "removed": clear_incoming(acct, "_batch")})
+            return
         if url.path == "/parse-clear":
-            acct = parse_qs(url.query).get("account", [""])[0]
+            q = parse_qs(url.query)
+            acct = q.get("account", [""])[0]
+            if q.get("batch", [""])[0] == "1":
+                # only the run that holds the lock may end it; keep=1 leaves the parsed files in _batch/<account>
+                run = q.get("run", [""])[0]
+                with RUN_GUARD:
+                    holder = RUN_LOCKS.get(acct, (0, ""))[1]
+                removed = 0
+                if run and holder == run:
+                    if q.get("keep", [""])[0] != "1":
+                        removed = clear_incoming(acct, "_batch")
+                    release_run(acct)
+                self.send_json(200, {"removed": removed, "released": bool(run and holder == run)})
+                return
             removed = clear_incoming(acct)
             release_run(acct)
             self.send_json(200, {"removed": removed})
@@ -529,7 +565,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             pdf = self.rfile.read(length)
             try:
-                self.send_json(200, parse_statement(pdf, q.get("account", [""])[0], q.get("file", [""])[0]))
+                self.send_json(200, parse_statement(pdf, q.get("account", [""])[0], q.get("file", [""])[0],
+                                                    q.get("run", [""])[0], q.get("batch", [""])[0] == "1"))
             except DecryptError as e:
                 self.send_json(e.status, {"error": e.message})
             except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
