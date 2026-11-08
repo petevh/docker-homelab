@@ -71,6 +71,10 @@
     "bank": "core/patterns/banks/ae/emirates-islamic.json",
     "layout": "credit_card"
   },
+  "absa_savings": {
+    "bank": "core/patterns/banks/za/absa.json",
+    "layout": "savings"
+  },
   "wio_credit_card": {
     "bank": "core/patterns/banks/ae/wio.json",
     "layout": "credit_card",
