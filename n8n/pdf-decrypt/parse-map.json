@@ -84,5 +84,13 @@
     "bank": "core/patterns/banks/ae/wio.json",
     "layout": "account_csv",
     "group": "wio_ae"
+  },
+  "absa_mortgage_amber": {
+    "bank": "core/patterns/banks/za/absa.json",
+    "layout": "home_loan"
+  },
+  "absa_mortgage_beacon": {
+    "bank": "core/patterns/banks/za/absa.json",
+    "layout": "home_loan"
   }
 }
