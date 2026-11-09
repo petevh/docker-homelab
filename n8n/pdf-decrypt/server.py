@@ -16,6 +16,7 @@ account key, so passwords never show up in n8n execution data.
                                current onedrive_folder (state file, see below)
   POST /decrypt?account=KEY    body = PDF, response = decrypted PDF
                                (unencrypted PDFs are returned unchanged)
+  POST /statement-subject?account=KEY  body = PDF -> {subject} the e-mail subject rebuilt from the text printed in the PDF ({} when not possible)
   POST /identify?accounts=A,B  body = PDF -> {owners: [keys whose by_content regex matches],
                                account: the key if exactly one, else ""}. Used by the
                                matcher to tell accounts apart when nothing else can: the key
@@ -477,6 +478,36 @@ def pdf_text(pdf):
     return "\n".join(lines)
 
 
+def statement_subject(pdf, account):
+    """The e-mail subject a statement would have had, rebuilt from the text in its PDF ({} when the bank file
+    has no `subject_from_text` for the account's layout or the text lacks a fact). See scripts/statement-subject.py."""
+    try:
+        with open(PARSE_MAP_PATH, encoding="utf-8") as f:
+            spec = json.load(f).get(account)
+    except (OSError, ValueError):
+        spec = None
+    if not spec:
+        raise DecryptError(404, f"no parse settings for '{account}' in parse-map.json")
+    if b"%PDF-" not in pdf[:1024]:
+        raise DecryptError(400, "not a PDF")
+    banks = load_banks()
+    if account not in banks:
+        raise DecryptError(404, f"unknown account '{account}'")
+    opened = decrypt(pdf, banks[account].get("decryption_password", ""))[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "statement.pdf")
+        with open(src, "wb") as f:
+            f.write(opened)
+        cmd = [sys.executable, os.path.join(REPO_DIR, "scripts", "statement-subject.py"), src,
+               "--bank", os.path.join(REPO_DIR, spec["bank"]), "--layout", spec.get("layout", "")]
+        run = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    try:
+        return json.loads(run.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
 def identify(pdf, banks, candidates):
     """Which of `candidates` (account keys) does this PDF belong to?
 
@@ -651,6 +682,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, parse_statement(pdf, q.get("account", [""])[0], q.get("file", [""])[0],
                                                     q.get("run", [""])[0], q.get("batch", [""])[0] == "1"))
+            except DecryptError as e:
+                self.send_json(e.status, {"error": e.message})
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+                self.send_json(500, {"error": f"{type(e).__name__}"})
+            return
+        if url.path == "/statement-subject":
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_BODY:
+                self.send_json(413 if length > MAX_BODY else 400, {"error": "bad body size"})
+                return
+            pdf = self.rfile.read(length)
+            try:
+                self.send_json(200, statement_subject(pdf, parse_qs(url.query).get("account", [""])[0]))
             except DecryptError as e:
                 self.send_json(e.status, {"error": e.message})
             except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
