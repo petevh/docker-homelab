@@ -100,5 +100,9 @@
   "maxprop_levies": {
     "bank": "core/patterns/banks/za/maxprop-levy.json",
     "layout": "levy"
+  },
+  "kwadukuza_rates": {
+    "bank": "core/patterns/banks/za/kwadukuza-rates.json",
+    "layout": "rates"
   }
 }
