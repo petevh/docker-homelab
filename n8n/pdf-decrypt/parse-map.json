@@ -96,5 +96,9 @@
   "amber_levy": {
     "bank": "core/patterns/banks/za/amber-levy.json",
     "layout": "levy"
+  },
+  "maxprop_levies": {
+    "bank": "core/patterns/banks/za/maxprop-levy.json",
+    "layout": "levy"
   }
 }
