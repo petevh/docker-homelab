@@ -104,5 +104,9 @@
   "kwadukuza_rates": {
     "bank": "core/patterns/banks/za/kwadukuza-rates.json",
     "layout": "rates"
+  },
+  "amber_rates": {
+    "bank": "core/patterns/banks/za/umngeni-rates.json",
+    "layout": "rates"
   }
 }

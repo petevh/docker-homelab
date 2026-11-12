@@ -27,6 +27,9 @@ account key, so passwords never show up in n8n execution data.
   run ID and empties _batch/<account>; POST /parse?account=KEY&file=NAME.pdf&run=ID&batch=1 then parses each file into _batch/<account> (kept
   under the file's own name, nothing replaced) while the same run holds the lock; POST /parse-clear?account=KEY&batch=1&run=ID[&keep=1] frees
   the lock and, unless keep=1, empties _batch/<account>.
+  Cache for parser tests: a batch /parse also keeps the statement PDF in _cache/<account> (inside the sidecar only). POST /recheck?account=KEY re-parses
+  the cached statements with the current bank file and returns only {counts, statements: [{name, status, tx, difference}]}: no OneDrive, no YNAB,
+  seconds instead of minutes. POST /payments?account=KEY returns each cached statement's payment line (statement, date, amount) for the n8n matching workflow (never printed by Claude). POST /cache-list?account=KEY lists the cached file names and sizes (which downloads arrived). POST /cache-clear?account=KEY empties it (purge it with the parsed folders when the backfills are done).
   A multi-account CSV (Wio): POST /parse-group?group=KEY&file=NAME.csv&run=ID[&skip=A,B] with the CSV as body (same run id / lock as the batch,
   started with /parse-batch-start?account=KEY) splits it by account as parse-statement.py --group does and keeps every OK result in _batch/<KEY>
   as <file>__<account key>.csv. Response: {ok, results: [{key, status, rows}], unmapped: [{label, rows}]}.
@@ -403,6 +406,8 @@ def parse_statement(pdf, account, original, run="", batch=False):
     name = original[:-4] if (batch and named) else f"{account}_{named.group(2) if named else original[:-4]}"
     if batch and not RUN_ID.match(run or ""):
         raise DecryptError(400, "a batch parse needs a run id")
+    if batch:
+        cache_put(account, original, pdf)      # kept for /recheck: a parser test then needs no OneDrive download
     if not acquire_run(account, run if batch else ""):
         raise DecryptError(409, f"another statement run for '{account}' is still busy")
     with PARSE_LOCK, tempfile.TemporaryDirectory() as tmp:
@@ -453,6 +458,122 @@ def parse_statement(pdf, account, original, run="", batch=False):
             pass
         result.update(ok=True, csv=final + ".csv")
         return result
+
+
+def cache_dir(account):
+    return os.path.join(PARSED_DIR, "_cache", account)
+
+
+def cache_put(account, original, pdf):
+    """Keep a statement PDF of a batch run (inside the sidecar only, like the parsed scratch files) so /recheck can re-parse it without downloading it again."""
+    if not re.match(r"^[a-z0-9_]{1,80}$", account or "") or not PARSE_NAME.match(original or ""):
+        return
+    folder = cache_dir(account)
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, f".{original}.tmp")
+    with open(tmp, "wb") as f:
+        f.write(pdf)
+    os.replace(tmp, os.path.join(folder, original))
+
+
+def cache_payments(account):
+    """The payment lines (receipts and credit transfers, added up per statement) of the cached statements of one account, for a caller that matches them with card
+    payments (the n8n rates-payments workflow). Amounts are returned to that caller only; the statement name, date and amount per statement."""
+    try:
+        with open(PARSE_MAP_PATH, encoding="utf-8") as f:
+            spec = json.load(f).get(account)
+    except (OSError, ValueError):
+        spec = None
+    if not spec:
+        raise DecryptError(404, f"no parse settings for '{account}' in parse-map.json")
+    folder = cache_dir(account)
+    if not os.path.isdir(folder) or not any(n.endswith(".pdf") for n in os.listdir(folder)):
+        raise DecryptError(404, "nothing cached for this account: run a folder dry run once first")
+    with PARSE_LOCK, tempfile.TemporaryDirectory() as out_dir:
+        cmd = [sys.executable, os.path.join(REPO_DIR, "scripts", "parse-statement.py"), folder,
+               "--bank", os.path.join(REPO_DIR, spec["bank"]), "--key", account,
+               "--config", CONFIG_PATH, "--passwords", PASSWORDS_PATH, "--out", out_dir]
+        if spec.get("layout"):
+            cmd += ["--layout", spec["layout"]]
+        subprocess.run(cmd, capture_output=True, text=True, timeout=300, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        out, charges = [], []
+        for name in sorted(os.listdir(out_dir)):
+            if not name.endswith(".csv"):
+                continue
+            with open(os.path.join(out_dir, name), newline="", encoding="utf-8") as f:
+                for r in csv.DictReader(f):
+                    if (r.get("memo") or "").strip() == "Payments" and (r.get("date") or "").strip():
+                        try:
+                            out.append({"statement": name[:-4], "date": r["date"], "amount": round(float(r["amount"]), 2)})
+                        except ValueError:
+                            pass
+                    elif (r.get("memo") or "").strip() == "Rates and charges" and (r.get("date") or "").strip():
+                        try:
+                            charges.append({"statement": name[:-4], "date": r["date"], "amount": round(float(r["amount"]), 2)})
+                        except ValueError:
+                            pass
+        return {"ok": True, "account": account, "payments": out, "charges": charges}
+
+
+def cache_list(account):
+    """File names and sizes of the cached statements (no content): which downloads of a folder run reached the sidecar."""
+    folder = cache_dir(account)
+    if not re.match(r"^[a-z0-9_]{1,80}$", account or "") or not os.path.isdir(folder):
+        return {"account": account, "files": [], "count": 0}
+    files = [{"name": n, "bytes": os.path.getsize(os.path.join(folder, n))} for n in sorted(os.listdir(folder)) if n.endswith(".pdf")]
+    return {"account": account, "files": files, "count": len(files)}
+
+
+def cache_clear(account):
+    folder = cache_dir(account)
+    removed = 0
+    if re.match(r"^[a-z0-9_]{1,80}$", account or "") and os.path.isdir(folder):
+        for f in os.listdir(folder):
+            path = os.path.join(folder, f)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+    return removed
+
+
+RECHECK_LINE = re.compile(r"^([A-Z][A-Z-]+): (.+?)\s+(\d+) tx")
+
+
+def recheck(account):
+    """Re-parse the cached statements of one account with the current bank file and return ONLY status lines: per statement its status, transaction count and
+    the difference of the total check (a number of cents or rand that says how far off it is, no balances). Nothing is written outside a temp folder."""
+    try:
+        with open(PARSE_MAP_PATH, encoding="utf-8") as f:
+            spec = json.load(f).get(account)
+    except (OSError, ValueError):
+        spec = None
+    if not spec:
+        raise DecryptError(404, f"no parse settings for '{account}' in parse-map.json")
+    folder = cache_dir(account)
+    if not os.path.isdir(folder) or not any(n.endswith(".pdf") for n in os.listdir(folder)):
+        raise DecryptError(404, "nothing cached for this account: run a folder dry run once first")
+    with PARSE_LOCK, tempfile.TemporaryDirectory() as out_dir:
+        cmd = [sys.executable, os.path.join(REPO_DIR, "scripts", "parse-statement.py"), folder,
+               "--bank", os.path.join(REPO_DIR, spec["bank"]), "--key", account,
+               "--config", CONFIG_PATH, "--passwords", PASSWORDS_PATH, "--out", out_dir]
+        if spec.get("layout"):
+            cmd += ["--layout", spec["layout"]]
+        run = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        statements, counts = [], {}
+        for line in run.stdout.splitlines():
+            m = RECHECK_LINE.match(line)
+            if not m:
+                continue
+            status, name, tx = m.group(1), m.group(2).strip(), int(m.group(3))
+            diff = None
+            check = os.path.join(out_dir, name + ".check.txt")
+            if os.path.exists(check):
+                with open(check, encoding="utf-8") as f:
+                    d = re.search(r"difference: (-?[\d.]+)", f.read())
+                diff = d.group(1) if d else None
+            counts[status] = counts.get(status, 0) + 1
+            statements.append({"name": name, "status": status, "tx": tx, "difference": diff})
+        return {"ok": True, "account": account, "counts": counts, "statements": statements}
 
 
 def pdf_text(pdf):
@@ -657,6 +778,37 @@ class Handler(BaseHTTPRequestHandler):
             removed = clear_incoming(acct)
             release_run(acct)
             self.send_json(200, {"removed": removed})
+            return
+        if url.path == "/recheck":
+            acct = parse_qs(url.query).get("account", [""])[0]
+            if not re.match(r"^[a-z0-9_]{1,80}$", acct):
+                self.send_json(400, {"error": "account needed"})
+                return
+            try:
+                self.send_json(200, recheck(acct))
+            except DecryptError as e:
+                self.send_json(e.status, {"error": e.message})
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+                self.send_json(500, {"error": f"{type(e).__name__}"})
+            return
+        if url.path == "/payments":
+            acct = parse_qs(url.query).get("account", [""])[0]
+            if not re.match(r"^[a-z0-9_]{1,80}$", acct):
+                self.send_json(400, {"error": "account needed"})
+                return
+            try:
+                self.send_json(200, cache_payments(acct))
+            except DecryptError as e:
+                self.send_json(e.status, {"error": e.message})
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+                self.send_json(500, {"error": f"{type(e).__name__}"})
+            return
+        if url.path == "/cache-list":
+            self.send_json(200, cache_list(parse_qs(url.query).get("account", [""])[0]))
+            return
+        if url.path == "/cache-clear":
+            acct = parse_qs(url.query).get("account", [""])[0]
+            self.send_json(200, {"removed": cache_clear(acct)})
             return
         if url.path == "/parse-group":
             q = parse_qs(url.query)
