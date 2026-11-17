@@ -29,7 +29,7 @@ account key, so passwords never show up in n8n execution data.
   the lock and, unless keep=1, empties _batch/<account>.
   Cache for parser tests: a batch /parse also keeps the statement PDF in _cache/<account> (inside the sidecar only). POST /recheck?account=KEY re-parses
   the cached statements with the current bank file and returns only {counts, statements: [{name, status, tx, difference}]}: no OneDrive, no YNAB,
-  seconds instead of minutes. POST /payments?account=KEY returns each cached statement's payment line (statement, date, amount) for the n8n matching workflow (never printed by Claude). POST /cache-list?account=KEY lists the cached file names and sizes (which downloads arrived). POST /cache-clear?account=KEY empties it (purge it with the parsed folders when the backfills are done).
+  seconds instead of minutes. POST /payments?account=KEY returns each cached statement's payment line (statement, date, amount) for the n8n matching workflow (never printed by Claude). GET /cache-pdf?account=KEY&file=NAME.pdf returns a cached statement (the folder dry run fetches the files it already has from here instead of OneDrive). POST /cache-list?account=KEY lists the cached file names and sizes (which downloads arrived). POST /cache-clear?account=KEY empties it (purge it with the parsed folders when the backfills are done).
   A multi-account CSV (Wio): POST /parse-group?group=KEY&file=NAME.csv&run=ID[&skip=A,B] with the CSV as body (same run id / lock as the batch,
   started with /parse-batch-start?account=KEY) splits it by account as parse-statement.py --group does and keeps every OK result in _batch/<KEY>
   as <file>__<account key>.csv. Response: {ok, results: [{key, status, rows}], unmapped: [{label, rows}]}.
@@ -476,6 +476,17 @@ def cache_put(account, original, pdf):
     os.replace(tmp, os.path.join(folder, original))
 
 
+def cache_get(account, original):
+    """The cached PDF bytes of one statement (None when not cached)."""
+    if not re.match(r"^[a-z0-9_]{1,80}$", account or "") or not PARSE_NAME.match(original or ""):
+        return None
+    path = os.path.join(cache_dir(account), original)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def cache_payments(account):
     """The payment lines (receipts and credit transfers, added up per statement) of the cached statements of one account, for a caller that matches them with card
     payments (the n8n rates-payments workflow). Amounts are returned to that caller only; the statement name, date and amount per statement."""
@@ -512,7 +523,14 @@ def cache_payments(account):
                             charges.append({"statement": name[:-4], "date": r["date"], "amount": round(float(r["amount"]), 2)})
                         except ValueError:
                             pass
-        return {"ok": True, "account": account, "payments": out, "charges": charges}
+        dues = []
+        for name in sorted(os.listdir(out_dir)):
+            if name.endswith(".check.txt"):
+                with open(os.path.join(out_dir, name), encoding="utf-8") as f:
+                    m = re.search(r"^total due \(payable\): (-?[0-9.]+)", f.read(), re.M)
+                if m:
+                    dues.append({"statement": name[:-len(".check.txt")], "amount": round(float(m.group(1)), 2)})
+        return {"ok": True, "account": account, "payments": out, "charges": charges, "dues": dues}
 
 
 def cache_list(account):
@@ -689,6 +707,17 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/health":
             self.send_json(200, {"status": "ok"})
+        elif path == "/cache-pdf":
+            q = parse_qs(urlparse(self.path).query)
+            pdf = cache_get(q.get("account", [""])[0], q.get("file", [""])[0])
+            if pdf is None:
+                self.send_json(404, {"error": "not in the cache"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(pdf)))
+            self.end_headers()
+            self.wfile.write(pdf)
         elif path == "/accounts":
             try:
                 banks = load_banks()
