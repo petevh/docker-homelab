@@ -16,6 +16,9 @@ account key, so passwords never show up in n8n execution data.
                                current onedrive_folder (state file, see below)
   POST /decrypt?account=KEY    body = PDF, response = decrypted PDF
                                (unencrypted PDFs are returned unchanged)
+  POST /decrypt-any            body = PDF; tries EVERY password in the passwords file (no account needed).
+                               Always 200, body = decrypted PDF (or the original on failure);
+                               X-Decrypt-Status: decrypted | not-encrypted | failed, X-Decrypt-Detail: reason
   POST /statement-subject?account=KEY  body = PDF -> {subject} the e-mail subject rebuilt from the text printed in the PDF ({} when not possible)
   POST /identify?accounts=A,B  body = PDF -> {owners: [keys whose by_content regex matches],
                                account: the key if exactly one, else ""}. Used by the
@@ -128,6 +131,20 @@ def load_passwords():
             return json.load(f)
     except FileNotFoundError:
         return {}
+
+
+def all_passwords():
+    """Every password in the passwords file (any account), de-duplicated, file order, no blanks.
+
+    For the OneDrive drop folder, where nothing says which account a PDF belongs to.
+    """
+    seen, out = set(), []
+    for value in load_passwords().values():
+        for pw in as_list(value):
+            if pw and pw not in seen:
+                seen.add(pw)
+                out.append(pw)
+    return out
 
 
 def clean_folder(path):
@@ -880,6 +897,31 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(e.status, {"error": e.message})
             except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
                 self.send_json(500, {"error": f"{type(e).__name__}"})
+            return
+        if url.path == "/decrypt-any":
+            # Drop-folder decryption: try every stored password. Always 200 with the file back
+            # (decrypted, or unchanged on failure) and the outcome in X-Decrypt-Status, so the
+            # n8n workflow keeps one binary to file either way. Never reports the password.
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_BODY:
+                self.send_json(413 if length > MAX_BODY else 400, {"error": "bad body size"})
+                return
+            pdf = self.rfile.read(length)
+            out, status, detail = pdf, "failed", ""
+            try:
+                out, was_encrypted, _ = decrypt(pdf, all_passwords() or [""])
+                status = "decrypted" if was_encrypted else "not-encrypted"
+            except DecryptError as e:
+                detail = e.message
+            except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+                detail = type(e).__name__
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(out)))
+            self.send_header("X-Decrypt-Status", status)
+            self.send_header("X-Decrypt-Detail", re.sub(r"[^\x20-\x7e]", "?", detail)[:200])
+            self.end_headers()
+            self.wfile.write(out)
             return
         if url.path != "/decrypt":
             self.send_json(404, {"error": "not found"})

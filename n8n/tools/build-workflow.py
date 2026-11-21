@@ -31,6 +31,9 @@ WORKFLOWS = {  # workflow file -> {node name -> source file}
         "Mail Outcome": SRC / "mail-outcome.js",
         "Run Summary": SRC / "run-summary.js",
     },
+    ROOT / "workflows" / "decrypt-drop-folder.json": {
+        "Pick Files": SRC / "pick-drop-files.js",
+    },
     ROOT / "workflows" / "monthly-summary.json": {
         "Monthly Summary": SRC / "monthly-summary.js",
     },

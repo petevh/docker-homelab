@@ -1,0 +1,477 @@
+[
+  {
+    "id": "DropDecrypt001",
+    "name": "Decrypt drop folder: OneDrive → qpdf → OneDrive",
+    "active": false,
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 2
+              }
+            ]
+          }
+        },
+        "name": "Every 2 min",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0],
+        "id": "d0c0de00-0000-4000-8000-000000000001"
+      },
+      {
+        "parameters": {},
+        "name": "Manual Run",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [0, 200],
+        "id": "d0c0de00-0000-4000-8000-000000000002"
+      },
+      {
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "id": "drop",
+                "name": "drop",
+                "value": "_decrypt",
+                "type": "string"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "name": "Config",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [220, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000003",
+        "notes": "drop = OneDrive folder (relative to the drive root) to watch. Decrypted/, Failed/ and Originals/ are created inside it."
+      },
+      {
+        "parameters": {
+          "jsCode": "const drop = $json.drop;\nreturn ['Decrypted', 'Failed', 'Originals'].map((name) => ({ json: { parent: drop, name } }));\n"
+        },
+        "name": "Folders",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [440, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000004"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/{{ $json.parent ? 'root:/' + encodeURI($json.parent) + ':' : 'root' }}/children",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ name: $json.name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }) }}",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "responseFormat": "json"
+              }
+            }
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "Ensure Folders",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [660, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000005",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 2000,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "method": "GET",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/root:/{{ encodeURI($('Config').first().json.drop) }}:/children?$top=100",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "responseFormat": "json"
+              }
+            }
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "List Drop",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [880, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000006",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "executeOnce": true
+      },
+      {
+        "parameters": {
+          "jsCode": "// Drop-folder decrypt: choose which files in the OneDrive drop folder to process this run.\n// Input: the Graph \"list children\" response of the drop folder. Output: one item per PDF.\n// Skipped: subfolders, non-PDFs (left alone), empty files, and files changed in the last\n// 60 s (OneDrive may still be syncing them; the next poll picks them up).\n// The download URL is NOT in the listing: the next node (Get Link) fetches it per file.\nconst MIN_AGE_MS = 60 * 1000;\nconst drop = $('Config').first().json.drop;\nconst children = $input.first().json.value || [];\nconst now = Date.now();\n\nconst out = [];\nfor (const c of children) {\n  if (!c.file || !/\\.pdf$/i.test(c.name || '')) continue;\n  if (!c.size) continue;\n  if (now - Date.parse(c.lastModifiedDateTime) < MIN_AGE_MS) continue;\n  out.push({ json: { id: c.id, name: c.name, size: c.size, drop } });\n}\nreturn out;\n"
+        },
+        "name": "Pick Files",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1100, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000007"
+      },
+      {
+        "parameters": {
+          "method": "GET",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/items/{{ $json.id }}",
+          "options": {
+            "timeout": 30000
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "Get Link",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1320, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000008",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      },
+      {
+        "parameters": {
+          "method": "GET",
+          "url": "={{ $json['@microsoft.graph.downloadUrl'] }}",
+          "options": {
+            "timeout": 90000,
+            "response": {
+              "response": {
+                "responseFormat": "file",
+                "outputPropertyName": "data"
+              }
+            }
+          }
+        },
+        "name": "Download",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1540, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000009"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://pdf-decrypt:8080/decrypt-any",
+          "sendBody": true,
+          "contentType": "binaryData",
+          "inputDataFieldName": "data",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "responseFormat": "file",
+                "outputPropertyName": "data"
+              }
+            },
+            "timeout": 120000
+          }
+        },
+        "name": "Decrypt Any",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1760, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000010"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "failed",
+                "leftValue": "={{ $json.headers['x-decrypt-status'] }}",
+                "rightValue": "failed",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "name": "Decrypt Failed?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [1980, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000011"
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/root:/{{ encodeURI($('Pick Files').item.json.drop) }}/Failed/{{ encodeURIComponent($('Pick Files').item.json.name) }}:/content?@microsoft.graph.conflictBehavior=rename",
+          "sendBody": true,
+          "contentType": "binaryData",
+          "inputDataFieldName": "data",
+          "options": {
+            "timeout": 120000
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "Upload Failed",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [2200, 200],
+        "id": "d0c0de00-0000-4000-8000-000000000012",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/root:/{{ encodeURI($('Pick Files').item.json.drop) }}/Decrypted/{{ encodeURIComponent($('Pick Files').item.json.name) }}:/content?@microsoft.graph.conflictBehavior=rename",
+          "sendBody": true,
+          "contentType": "binaryData",
+          "inputDataFieldName": "data",
+          "options": {
+            "timeout": 120000
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "Upload Decrypted",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [2200, 0],
+        "id": "d0c0de00-0000-4000-8000-000000000013",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000
+      },
+      {
+        "parameters": {
+          "method": "PATCH",
+          "url": "=https://graph.microsoft.com/v1.0/me/drive/items/{{ $('Pick Files').item.json.id }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ parentReference: { path: '/drive/root:/' + $('Pick Files').item.json.drop + '/Originals' }, '@microsoft.graph.conflictBehavior': 'rename' }) }}",
+          "options": {
+            "timeout": 30000
+          },
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "microsoftOneDriveOAuth2Api"
+        },
+        "name": "Move Original",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [2420, 100],
+        "id": "d0c0de00-0000-4000-8000-000000000014",
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "h71mqlA3kUgrmQd7",
+            "name": "Onedrive - Pete"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      }
+    ],
+    "connections": {
+      "Every 2 min": {
+        "main": [
+          [
+            {
+              "node": "Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Run": {
+        "main": [
+          [
+            {
+              "node": "Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Config": {
+        "main": [
+          [
+            {
+              "node": "Folders",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Folders": {
+        "main": [
+          [
+            {
+              "node": "Ensure Folders",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ensure Folders": {
+        "main": [
+          [
+            {
+              "node": "List Drop",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "List Drop": {
+        "main": [
+          [
+            {
+              "node": "Pick Files",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pick Files": {
+        "main": [
+          [
+            {
+              "node": "Get Link",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Link": {
+        "main": [
+          [
+            {
+              "node": "Download",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download": {
+        "main": [
+          [
+            {
+              "node": "Decrypt Any",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decrypt Any": {
+        "main": [
+          [
+            {
+              "node": "Decrypt Failed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decrypt Failed?": {
+        "main": [
+          [
+            {
+              "node": "Upload Failed",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Upload Decrypted",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Failed": {
+        "main": [
+          [
+            {
+              "node": "Move Original",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Decrypted": {
+        "main": [
+          [
+            {
+              "node": "Move Original",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  }
+]
